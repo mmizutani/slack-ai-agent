@@ -1,25 +1,26 @@
 /**
- * Example approvable action — a minimal skeleton showing the pattern.
+ * Example custom action — a minimal skeleton showing the pattern.
  *
- * Approvable actions are tools that require human confirmation before
- * executing. The bot posts a Slack confirmation dialog; execution only
- * happens after the user clicks Approve.
+ * Custom actions are tools loaded from config/custom-actions/.
+ * By default they require human confirmation before executing; set
+ * `requiresApproval: false` and implement `invoke()` for immediate tools
+ * (e.g. read-only Google Doc access).
  *
  * To create your own:
  * 1. Copy this file and rename it (e.g. create-ticket.ts)
- * 2. Implement the ApprovableAction interface
+ * 2. Implement the CustomAction interface
  * 3. Export an instance as the default export
- * 4. The loader (src/approvable-actions/loader.ts) auto-discovers files
+ * 4. The loader (src/custom-actions/loader.ts) auto-discovers files
  *    in this directory (files prefixed with "example-" are skipped)
  *
- * See src/approvable-actions/types.ts for the full interface definition.
+ * See src/custom-actions/types.ts for the full interface definition.
  */
 
 import type {
-  ApprovableAction,
+  CustomAction,
   ActionSlackContext,
   ActionDependencies,
-} from "../../src/approvable-actions/types";
+} from "../../src/custom-actions/types";
 import type { SlackBlock } from "../../src/types";
 import { Logger } from "../../src/logger";
 
@@ -30,9 +31,9 @@ export interface ExampleActionParams {
   description?: string;
 }
 
-export class ExampleAction implements ApprovableAction<ExampleActionParams> {
+export class ExampleAction implements CustomAction<ExampleActionParams> {
   name = "example_action";
-  description = `An example approvable action. Use this as a template for building
+  description = `An example custom action. Use this as a template for building
 your own human-in-the-loop actions. Replace this description with guidance for
 when the AI agent should invoke this tool.`;
 
