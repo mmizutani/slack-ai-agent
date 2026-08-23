@@ -1,6 +1,41 @@
-import { FABLE_MODEL, HAIKU_MODEL, resolveMode } from "./request-mode";
+import {
+  FABLE_MODEL,
+  HAIKU_MODEL,
+  mergeChannelModeDefaults,
+  resolveMode,
+} from "./request-mode";
+import { parseModelRef } from "./agent/model";
+
+describe("parseModelRef", () => {
+  it.each([
+    ["claude-opus-5", { provider: "anthropic", model: "claude-opus-5" }],
+    ["anthropic/claude-opus-5", { provider: "anthropic", model: "claude-opus-5" }],
+    ["openai/gpt-5.6-luna", { provider: "openai", model: "gpt-5.6-luna" }],
+  ])("parses %p", (value, expected) => {
+    expect(parseModelRef(value)).toEqual(expected);
+  });
+
+  it("rejects an unknown provider", () => {
+    expect(() => parseModelRef("google/gemini")).toThrow(/invalid model/i);
+  });
+});
 
 describe("resolveMode", () => {
+  it("merges partial channel settings without replacing the default provider", () => {
+    const defaultModel = { provider: "openai" as const, model: "gpt-5.6-luna" };
+
+    expect(mergeChannelModeDefaults({ effort: "max" }, defaultModel)).toEqual({
+      model: defaultModel,
+      effort: "max",
+    });
+    expect(
+      resolveMode(
+        "think fast",
+        mergeChannelModeDefaults({ effort: "max" }, defaultModel),
+      ),
+    ).toEqual({ model: defaultModel, effort: "max" });
+  });
+
   it("returns empty mode for plain text and no channel override", () => {
     expect(resolveMode("hello", undefined)).toEqual({});
     expect(resolveMode(undefined, undefined)).toEqual({});
@@ -117,6 +152,18 @@ describe("resolveMode", () => {
     });
     expect(resolveMode("think hard", { model: "claude-opus-5" })).toEqual({
       model: "claude-opus-5",
+      effort: "max",
+    });
+  });
+
+  it("does not let legacy Anthropic trigger aliases switch an OpenAI channel", () => {
+    const openaiModel = { provider: "openai" as const, model: "gpt-5.6-luna" };
+
+    expect(resolveMode("think fast", { model: openaiModel })).toEqual({
+      model: openaiModel,
+    });
+    expect(resolveMode("think harder", { model: openaiModel })).toEqual({
+      model: openaiModel,
       effort: "max",
     });
   });

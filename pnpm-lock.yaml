@@ -16,6 +16,9 @@ importers:
       "@modelcontextprotocol/sdk":
         specifier: ^1.30.0
         version: 1.30.0(supports-color@8.1.1)(zod@4.4.3)
+      "@openai/agents":
+        specifier: 0.17.0
+        version: 0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)
       "@opentelemetry/api":
         specifier: ^1.9.1
         version: 1.9.1
@@ -920,6 +923,20 @@ packages:
         integrity: sha512-iUKgm52T8HOE/makSxjqoWhe95ZJA1/G1sYsGev2JDKUSS14KAgg1LHb+Ba+IPow0xflbnSkOsZcO08C7w1gYw==,
       }
 
+  "@modelcontextprotocol/client@2.0.0":
+    resolution:
+      {
+        integrity: sha512-8f1OghQ2rjzIOfqgUCP+8GiUWqRs89njoWLNqAe8kWmDePv3s1fZXseej+QXemssEuuOvLLmLO/kqM3IQHtISw==,
+      }
+    engines: { node: ">=20" }
+
+  "@modelcontextprotocol/core@2.0.0":
+    resolution:
+      {
+        integrity: sha512-pJCEwGG7Lfr/+PQp9ZTwKXNeO5wzbfKL7H3MYpCorM4oFBoQrdjnBgEoqG+RjhsvS1FKrDbKux+M1HhlnGWqcA==,
+      }
+    engines: { node: ">=20" }
+
   "@modelcontextprotocol/sdk@1.30.0":
     resolution:
       {
@@ -942,6 +959,41 @@ packages:
     peerDependencies:
       "@emnapi/core": ^1.7.1 || ^2.0.0-alpha.4
       "@emnapi/runtime": ^1.7.1 || ^2.0.0-alpha.4
+
+  "@openai/agents-core@0.17.0":
+    resolution:
+      {
+        integrity: sha512-lyoF860313ypeKSPRsdmyNK1ypF8/ocShN2EwCcKUpF4VvRWa5AUVKL6VXO/keQMwNPZw5SACAf1siU9uMvUNg==,
+      }
+    peerDependencies:
+      zod: ^4.0.0
+    peerDependenciesMeta:
+      zod:
+        optional: true
+
+  "@openai/agents-openai@0.17.0":
+    resolution:
+      {
+        integrity: sha512-pMqXK7YtNI3U9KLAZIt+WzB9AReOWt/kiY8nhc9eXWcIZIpkmrzFd6dQgBpGLKWPfvEfgRCDeIVfHpWoXr7hEg==,
+      }
+    peerDependencies:
+      zod: ^4.0.0
+
+  "@openai/agents-realtime@0.17.0":
+    resolution:
+      {
+        integrity: sha512-spHgDIaWQIOJjwowjBTo0X9Jn3+CGX9fWgsyRUilsQ8SsnNrAre2km6sr8HwFnRiyQC0XpmTccieyfuXmzMfXg==,
+      }
+    peerDependencies:
+      zod: ^4.0.0
+
+  "@openai/agents@0.17.0":
+    resolution:
+      {
+        integrity: sha512-yzJ3tfHLO/6um9wsZ5IzEAQDaY7VcDBMxOPq7IgBaJkEPHrGX0vIXWGL0aqyreikHW4OpVmWwCaBBIOxxILXlA==,
+      }
+    peerDependencies:
+      zod: ^4.0.0
 
   "@opentelemetry/api-logs@0.221.0":
     resolution:
@@ -1790,6 +1842,12 @@ packages:
     resolution:
       {
         integrity: sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==,
+      }
+
+  "@standard-schema/spec@1.1.0":
+    resolution:
+      {
+        integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==,
       }
 
   "@tybys/wasm-util@0.10.3":
@@ -3923,6 +3981,30 @@ packages:
       }
     engines: { node: ">=6" }
 
+  openai@7.5.0:
+    resolution:
+      {
+        integrity: sha512-ZbDBz8FSB8Mv8fFYIUvzTFMdV5vl93/octp1MdtK2lfYepSpfv/ewmeugpKz/cwGtFSx+YuUM4NwpZ2P55YiPA==,
+      }
+    engines: { node: ">=22.0.0" }
+    peerDependencies:
+      "@aws-sdk/credential-provider-node": ">=3.972.0 <4"
+      "@smithy/hash-node": ">=4.3.0 <5"
+      "@smithy/signature-v4": ">=5.4.0 <6"
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      "@aws-sdk/credential-provider-node":
+        optional: true
+      "@smithy/hash-node":
+        optional: true
+      "@smithy/signature-v4":
+        optional: true
+      ws:
+        optional: true
+      zod:
+        optional: true
+
   p-finally@1.0.0:
     resolution:
       {
@@ -5340,6 +5422,22 @@ snapshots:
 
   "@js-sdsl/ordered-map@4.4.2": {}
 
+  "@modelcontextprotocol/client@2.0.0":
+    dependencies:
+      "@modelcontextprotocol/core": 2.0.0
+      cross-spawn: 7.0.6
+      eventsource: 3.0.7
+      eventsource-parser: 3.1.1
+      jose: 6.2.10
+      pkce-challenge: 5.0.1
+      zod: 4.4.3
+    optional: true
+
+  "@modelcontextprotocol/core@2.0.0":
+    dependencies:
+      zod: 4.4.3
+    optional: true
+
   "@modelcontextprotocol/sdk@1.30.0(supports-color@8.1.1)(zod@4.4.3)":
     dependencies:
       "@hono/node-server": 2.1.1(hono@4.13.3)
@@ -5368,6 +5466,66 @@ snapshots:
       "@emnapi/runtime": 1.10.0
       "@tybys/wasm-util": 0.10.3
     optional: true
+
+  "@openai/agents-core@0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)":
+    dependencies:
+      "@standard-schema/spec": 1.1.0
+      debug: 4.4.3(supports-color@8.1.1)
+      openai: 7.5.0(ws@8.21.3)(zod@4.4.3)
+    optionalDependencies:
+      "@modelcontextprotocol/client": 2.0.0
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - "@aws-sdk/credential-provider-node"
+      - "@smithy/hash-node"
+      - "@smithy/signature-v4"
+      - supports-color
+      - ws
+
+  "@openai/agents-openai@0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)":
+    dependencies:
+      "@openai/agents-core": 0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)
+      debug: 4.4.3(supports-color@8.1.1)
+      openai: 7.5.0(ws@8.21.3)(zod@4.4.3)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - "@aws-sdk/credential-provider-node"
+      - "@smithy/hash-node"
+      - "@smithy/signature-v4"
+      - supports-color
+      - ws
+
+  "@openai/agents-realtime@0.17.0(supports-color@8.1.1)(zod@4.4.3)":
+    dependencies:
+      "@openai/agents-core": 0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)
+      "@types/ws": 8.18.1
+      debug: 4.4.3(supports-color@8.1.1)
+      ws: 8.21.3
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - "@aws-sdk/credential-provider-node"
+      - "@smithy/hash-node"
+      - "@smithy/signature-v4"
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+
+  "@openai/agents@0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)":
+    dependencies:
+      "@openai/agents-core": 0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)
+      "@openai/agents-openai": 0.17.0(supports-color@8.1.1)(ws@8.21.3)(zod@4.4.3)
+      "@openai/agents-realtime": 0.17.0(supports-color@8.1.1)(zod@4.4.3)
+      debug: 4.4.3(supports-color@8.1.1)
+      openai: 7.5.0(ws@8.21.3)(zod@4.4.3)
+      zod: 4.4.3
+    transitivePeerDependencies:
+      - "@aws-sdk/credential-provider-node"
+      - "@smithy/hash-node"
+      - "@smithy/signature-v4"
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+      - ws
 
   "@opentelemetry/api-logs@0.221.0":
     dependencies:
@@ -6152,6 +6310,8 @@ snapshots:
       - supports-color
 
   "@stablelib/base64@1.0.1": {}
+
+  "@standard-schema/spec@1.1.0": {}
 
   "@tybys/wasm-util@0.10.3":
     dependencies:
@@ -7543,6 +7703,11 @@ snapshots:
   onetime@5.1.2:
     dependencies:
       mimic-fn: 2.1.0
+
+  openai@7.5.0(ws@8.21.3)(zod@4.4.3):
+    optionalDependencies:
+      ws: 8.21.3
+      zod: 4.4.3
 
   p-finally@1.0.0: {}
 

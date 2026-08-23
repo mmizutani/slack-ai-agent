@@ -13,14 +13,18 @@ import type {
   ActionDependencies,
   PendingActionSession,
 } from "./types";
+import type {
+  ActionToolDefinition,
+  ActionToolResult,
+} from "./tool-definitions";
 
 /**
  * Central registry for all custom actions.
  *
  * Responsibilities:
  * - Registers action definitions at startup
- * - Creates per-request SDK MCP servers (via `createSdkMcpServer`)
- *   that close over Slack context so Claude can call them naturally
+ * - Exposes provider-neutral per-request action definitions that close over
+ *   Slack context; provider adapters construct their own tool representation
  * - Posts Slack confirmation dialogs on tool invocation
  * - Dispatches approve/cancel button clicks to the correct action
  * - Purges stale sessions
@@ -74,55 +78,63 @@ export class CustomActionRegistry {
   };
 
   /**
-   * Build an SDK MCP server config that can be merged into the
-   * `options.mcpServers` map passed to `query()`.
-   *
-   * A *new* server is created every request so the tool handlers
-   * can close over the specific `slackContext` for that request.
+   * Build provider-neutral action definitions for one request. A new set is
+   * returned each time so handlers close over the request's Slack context.
+   */
+  getActionToolDefinitions(
+    slackContext: ActionSlackContext,
+    filter?: (action: CustomAction<any>) => boolean,
+  ): ActionToolDefinition[] {
+    const actions = [...this.actions.values()].filter(
+      action => this.isActionEnabled(action) && (!filter || filter(action)),
+    );
+    return actions.map(action => ({
+      identity: {
+        kind: "action" as const,
+        server: action.mcpServerName ?? "custom-actions",
+        name: action.name,
+      },
+      name: action.name,
+      description: action.description,
+      inputSchema: action.inputSchema,
+      requiresApproval: action.requiresApproval !== false,
+      invoke: async (args: unknown): Promise<ActionToolResult> => {
+        const result = await this.handleToolCall(
+          action.name,
+          args,
+          slackContext,
+        );
+        const text = result.content
+          .filter(item => item.type === "text")
+          .map(item => item.text)
+          .join("\n");
+        return {
+          ...(text && { text }),
+          ...(result.suppressReply && { suppressReply: true }),
+          ...(result.confirmationDialogPosted && {
+            confirmationDialogPosted: true,
+          }),
+          ...(result.isError !== undefined && { isError: result.isError }),
+        };
+      },
+    }));
+  }
+
+  /**
+   * Backward-compatible grouping used by callers that still use the old
+   * method name. The returned values are provider-neutral definitions; the
+   * Claude adapter is responsible for constructing SDK MCP servers.
    */
   async createMcpServerConfig(
     slackContext: ActionSlackContext,
     filter?: (action: CustomAction<any>) => boolean,
-  ): Promise<Record<string, any>> {
-    const actions = [...this.actions.values()].filter(
-      action => this.isActionEnabled(action) && (!filter || filter(action)),
-    );
-    if (actions.length === 0) {
-      return {};
+  ): Promise<Record<string, ActionToolDefinition[]>> {
+    const grouped: Record<string, ActionToolDefinition[]> = {};
+    for (const definition of this.getActionToolDefinitions(slackContext, filter)) {
+      const server = definition.identity.server ?? "custom-actions";
+      (grouped[server] ??= []).push(definition);
     }
-
-    // Dynamic ESM import (same pattern as claude-handler.ts)
-    const { createSdkMcpServer, tool } = await eval(
-      'import("@anthropic-ai/claude-agent-sdk")',
-    );
-
-    const byServer = new Map<string, CustomAction<any>[]>();
-    for (const action of actions) {
-      const serverName = action.mcpServerName ?? "custom-actions";
-      const bucket = byServer.get(serverName) ?? [];
-      bucket.push(action);
-      byServer.set(serverName, bucket);
-    }
-
-    const servers: Record<string, any> = {};
-    for (const [serverName, serverActions] of byServer) {
-      const tools = serverActions.map(action =>
-        tool(
-          action.name,
-          action.description,
-          action.inputSchema,
-          async (args: any) => {
-            return this.handleToolCall(action.name, args, slackContext);
-          },
-        ),
-      );
-      servers[serverName] = createSdkMcpServer({
-        name: serverName,
-        tools,
-      });
-    }
-
-    return servers;
+    return grouped;
   }
 
   // ------------------------------------------------------------------
@@ -172,13 +184,19 @@ export class CustomActionRegistry {
     actionName: string,
     params: any,
     ctx: ActionSlackContext,
-  ): Promise<{ content: Array<{ type: "text"; text: string }> }> {
+  ): Promise<{
+    content: Array<{ type: "text"; text: string }>;
+    suppressReply?: boolean;
+    confirmationDialogPosted?: boolean;
+    isError?: boolean;
+  }> {
     const action = this.actions.get(actionName);
     if (!action) {
       return {
         content: [
           { type: "text" as const, text: `Unknown action: ${actionName}` },
         ],
+        isError: true,
       };
     }
 
@@ -192,6 +210,7 @@ export class CustomActionRegistry {
               text: `Action "${actionName}" is misconfigured: requiresApproval is false but invoke is missing.`,
             },
           ],
+          isError: true,
         };
       }
 
@@ -211,6 +230,7 @@ export class CustomActionRegistry {
               text: `Error in ${actionName}: ${message}`,
             },
           ],
+          isError: true,
         };
       }
     }
@@ -295,6 +315,9 @@ export class CustomActionRegistry {
               text: `Action "${actionName}" was auto-approved via ${matchedYoloEmoji} but execution FAILED: ${errMessage}. Do not call this tool again for the same request. Do not send any additional text response to the user — the failure has already been reported to the thread.`,
             },
           ],
+          suppressReply: true,
+          confirmationDialogPosted: true,
+          isError: true,
         };
       }
 
@@ -307,6 +330,8 @@ export class CustomActionRegistry {
             text: `Action "${actionName}" was auto-approved via ${matchedYoloEmoji} and has been executed. Do not call this tool again for the same request. Do not send any additional text response to the user.`,
           },
         ],
+        suppressReply: true,
+        confirmationDialogPosted: true,
       };
     }
 
@@ -412,6 +437,8 @@ export class CustomActionRegistry {
           text: `A confirmation dialog has been posted in the Slack thread. The user must click "Approve" before the action will execute. Do not call this tool again for the same request. Do not send any additional text response to the user — the confirmation dialog is sufficient.`,
         },
       ],
+      suppressReply: true,
+      confirmationDialogPosted: true,
     };
   }
 

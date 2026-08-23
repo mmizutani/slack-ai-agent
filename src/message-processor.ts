@@ -1,5 +1,7 @@
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
-import { ClaudeHandler } from "./claude-handler";
+import { AgentEvent, AgentRunRequest, RuntimeToolBundle } from "./agent/events";
+import { AgentRuntime } from "./agent/runtime";
+import { AgentRuntimeRegistry } from "./runtimes/registry";
+import { ModelRef } from "./agent/model";
 import { RequestMode } from "./request-mode";
 import {
   ConversationSession,
@@ -18,45 +20,42 @@ import {
 export interface MessageProcessorResult {
   messages: string[];
   shouldNotRespond: boolean;
-  /** True when the agent explicitly returned DO_NOT_RESPOND (not action-only suppression). */
+  failed?: boolean;
   doNotRespondOptOut?: boolean;
   debugLogs?: string[];
   toolCalls?: string[];
   toolCallNames?: string[];
-  /** True when an custom action posted a confirmation dialog this turn. */
   confirmationDialogPosted?: boolean;
   tokenUsage?: TokenUsage;
   turnCount?: number;
-  /** Agent Claude API cost (USD) from the SDK result message. Excludes smart-reply
-   *  classifier spend, which is tracked separately via slack_ai_bot_message_classification. */
   costUsd?: number;
   phaseTimings?: PhaseTimings;
+  provider?: "anthropic" | "openai";
+  model?: string;
 }
 
-/** Tool results that tell the agent not to send a follow-up chat message. */
+export const GENERIC_FAILURE_MESSAGE =
+  "❌ Something went wrong while processing your request. Please try again.";
+
 const CUSTOM_ACTION_SUPPRESSES_REPLY =
   /confirmation dialog has been posted|Do not send any additional text response to the user/i;
 
 export class MessageProcessor {
   private logger = new Logger("MessageProcessor");
-  private claudeHandler: ClaudeHandler;
+  private runtimeRegistry: AgentRuntimeRegistry;
   private reactionManager: ReactionManager;
   private channelConfig: ChannelConfigManager;
 
   constructor(
-    claudeHandler: ClaudeHandler,
+    runtimeRegistry: AgentRuntimeRegistry,
     reactionManager: ReactionManager,
     channelConfig: ChannelConfigManager,
   ) {
-    this.claudeHandler = claudeHandler;
+    this.runtimeRegistry = runtimeRegistry;
     this.reactionManager = reactionManager;
     this.channelConfig = channelConfig;
   }
 
-  /**
-   * Log with privacy handling and optionally add to debug logs for [DEBUG] mode.
-   * Server logs respect allowFullLogging; debug logs always show full content + safeData.
-   */
   private logSensitive(
     message: string,
     safeData: Record<string, unknown>,
@@ -78,12 +77,6 @@ export class MessageProcessor {
     }
   }
 
-  /**
-   * DO_NOT_RESPOND is only honored where the bot is speaking proactively and
-   * should be able to opt out of replying: conditional-reply channels and
-   * smart-reply turns. In directly-addressed contexts (DMs, @-mentions) the
-   * literal string would otherwise be posted, so we ignore it there.
-   */
   private async shouldHonorDoNotRespond(
     slackContext: SlackContext,
   ): Promise<boolean> {
@@ -94,16 +87,10 @@ export class MessageProcessor {
     );
   }
 
-  /**
-   * Check if reactions should be shown for this message (no reactions for ephemeral messages)
-   */
   private async shouldShowReactions(
     slackContext: SlackContext,
   ): Promise<boolean> {
-    // Smart-reply turns stay invisible until (and unless) the bot actually
-    // posts, so it never leaves a stray 👀/✅ on a message it chose to skip.
     if (slackContext.smartReply) return false;
-
     const isEphemeralChannel =
       await this.channelConfig.shouldUseEphemeralMessaging(
         slackContext.channel,
@@ -116,18 +103,18 @@ export class MessageProcessor {
     return !willBeEphemeral;
   }
 
-  /**
-   * Process messages from Claude SDK stream
-   */
-  async processClaudeStream(
+  /** Consume only normalized AgentEvent values from any provider runtime. */
+  async processAgentStream(
     prompt: string,
     session: ConversationSession,
     abortController: AbortController,
+    runtime: AgentRuntime,
     slackContext?: SlackContext,
     sessionKey?: string,
     systemPrompt?: string,
     allowFullLogging?: boolean,
     requestMode?: RequestMode,
+    runtimeTools: RuntimeToolBundle = {},
   ): Promise<MessageProcessorResult> {
     const currentMessages: string[] = [];
     const debugLogs: string[] = [];
@@ -139,19 +126,31 @@ export class MessageProcessor {
     let tokenUsage: TokenUsage | undefined;
     let costUsd: number | undefined;
     let turnCount = 0;
+    let finalText = "";
+    let terminalOutcome: Extract<AgentEvent, { type: "terminal" }> | undefined;
+    let failed = false;
     const timings: PhaseTimings = {};
-
-    // Check if debug mode is enabled
     const isDebugMode = prompt.includes("[DEBUG]");
+    const requestedModel =
+      typeof requestMode?.model === "string"
+        ? requestMode.model
+        : requestMode?.model?.model;
+    const model: ModelRef = {
+      provider:
+        typeof requestMode?.model === "object"
+          ? requestMode.model.provider
+          : runtime.provider,
+      model: requestedModel ?? "",
+    };
 
-    // Log query start with session info
     this.logger.info("📝 Starting query", {
       promptLen: prompt.length,
-      resuming: !!session.sessionId,
+      resuming: !!session.providerState[runtime.provider],
+      provider: runtime.provider,
+      model: model.model || "default",
       isDebugMode: isDebugMode ? "true" : "false",
     });
 
-    // Start with thinking reaction
     const reactionStart = Date.now();
     if (
       sessionKey &&
@@ -164,90 +163,153 @@ export class MessageProcessor {
 
     const streamStart = Date.now();
     let firstMessageReceived = false;
-
-    for await (const message of this.claudeHandler.streamQuery(
+    const request: AgentRunRequest = {
       prompt,
-      session,
-      abortController,
-      slackContext,
-      async () => {},
       systemPrompt,
-      requestMode,
-    )) {
+      session,
+      slackContext,
+      model,
+      effort: requestMode?.effort,
+      fast: requestMode?.fast,
+      signal: abortController.signal,
+      maxTurns: 400,
+      permissions:
+        runtimeTools.permissionPolicy &&
+        typeof runtimeTools.permissionPolicy === "object"
+          ? (runtimeTools.permissionPolicy as AgentRunRequest["permissions"])
+          : {},
+      tools: runtimeTools,
+      metadata: {
+        requestId: `${sessionKey ?? "session"}:${Date.now()}`,
+        sessionKey: sessionKey ?? `${session.userId}-${session.channelId}`,
+      },
+    };
+
+    for await (const event of runtime.stream(request)) {
       if (!firstMessageReceived) {
-        timings.claude_time_to_first_message_ms = Date.now() - streamStart;
+        timings.agent_time_to_first_message_ms = Date.now() - streamStart;
         firstMessageReceived = true;
       }
 
-      if (abortController.signal.aborted) {
-        this.logger.warn("⏹️ Aborted", { sessionKey });
-        break;
-      }
-
-      if (message.type === "assistant") {
-        // Count each assistant message as a turn in the agentic loop
-        turnCount++;
-
-        await this.processAssistantMessage(
-          message,
-          currentMessages,
-          sessionKey,
-          slackContext,
-          isDebugMode,
-          debugLogs,
-          toolCalls,
-          toolCallNames,
-          allowFullLogging,
-        );
-
-        // Check for special responses
-        const content = this.extractTextContent(message);
+      if (event.type === "text_delta" || event.type === "text_complete") {
+        finalText += event.text;
         if (
-          content &&
-          content.match(/DO_NOT_RESPOND/i) &&
+          /DO_NOT_RESPOND/i.test(finalText) &&
           slackContext &&
           (await this.shouldHonorDoNotRespond(slackContext))
         ) {
           shouldNotRespond = true;
           doNotRespondOptOut = true;
         }
-      } else if (message.type === "user") {
-        // Handle tool result messages (user messages with tool_result content)
-        const suppressReply = this.processToolResultMessage(
-          message,
+        continue;
+      }
+
+      if (event.type === "tool_call") {
+        turnCount++;
+        const name = event.tool.server
+          ? `${event.tool.server}/${event.tool.name}`
+          : event.tool.name;
+        const safeName =
+          name === "Skill" &&
+          typeof (event.arguments as any)?.skill === "string"
+            ? `Skill:${(event.arguments as any).skill}`
+            : name;
+        const params = Object.entries(
+          (event.arguments as Record<string, unknown>) ?? {},
+        )
+          .map(([key, value]) => {
+            const rendered =
+              typeof value === "string" ? value : JSON.stringify(value);
+            return `${key}=${truncateForLog(rendered, TOOL_CALL_PARAM_LOG_MAX_LENGTH)}`;
+          })
+          .join(", ");
+        const formatted = params ? `${name}(${params})` : `${name}()`;
+        this.logSensitive(
+          "🔧",
+          { tools: [safeName] },
+          formatted,
+          allowFullLogging ?? false,
           isDebugMode,
           debugLogs,
-          allowFullLogging,
         );
-        if (suppressReply?.confirmationDialogPosted) {
-          confirmationDialogPosted = true;
+        toolCalls.push(formatted);
+        toolCallNames.push(safeName);
+        if (
+          sessionKey &&
+          slackContext &&
+          (await this.shouldShowReactions(slackContext))
+        ) {
+          await this.reactionManager.updateReaction(
+            sessionKey,
+            REACTIONS.TOOL_USE,
+          );
         }
-        if (suppressReply?.shouldNotRespond) {
+        continue;
+      }
+
+      if (event.type === "tool_result") {
+        const output =
+          typeof event.output === "string"
+            ? event.output
+            : JSON.stringify(event.output ?? "");
+        this.logSensitive(
+          `📋 Result (${output.length} chars):`,
+          {},
+          truncateForLog(output, TOOL_RESPONSE_LOG_MAX_LENGTH),
+          allowFullLogging ?? false,
+          isDebugMode,
+          debugLogs,
+        );
+        if (
+          event.suppressReply ||
+          event.confirmationDialogPosted ||
+          CUSTOM_ACTION_SUPPRESSES_REPLY.test(output)
+        ) {
           shouldNotRespond = true;
         }
-      } else if (message.type === "result") {
-        await this.processResultMessage(message, currentMessages);
+        if (event.confirmationDialogPosted) confirmationDialogPosted = true;
+        continue;
+      }
 
-        // Extract token usage from result message (check both direct and nested locations)
-        const usage = (message as any).usage || (message as any).message?.usage;
-        if (usage) {
+      if (event.type === "session_update") {
+        session.providerState[event.state.provider] = event.state;
+        if (
+          event.state.provider === "anthropic" &&
+          event.state.sessionId
+        ) {
+          session.sessionId = event.state.sessionId;
+        }
+        continue;
+      }
+
+      if (event.type === "usage") {
+        tokenUsage = {
+          inputTokens: event.usage.inputTokens ?? 0,
+          outputTokens: event.usage.outputTokens ?? 0,
+          cacheReadInputTokens: event.usage.cachedInputTokens,
+          cacheCreationInputTokens: event.usage.cacheWriteTokens,
+        };
+        continue;
+      }
+
+      if (event.type === "terminal") {
+        terminalOutcome = event;
+        if (event.outcome === "failed") {
+          failed = true;
+        }
+        if (event.turnCount !== undefined) turnCount = event.turnCount;
+        if (event.usage) {
           tokenUsage = {
-            inputTokens: usage.input_tokens || 0,
-            outputTokens: usage.output_tokens || 0,
-            cacheReadInputTokens: usage.cache_read_input_tokens,
-            cacheCreationInputTokens: usage.cache_creation_input_tokens,
+            inputTokens: event.usage.inputTokens ?? 0,
+            outputTokens: event.usage.outputTokens ?? 0,
+            cacheReadInputTokens: event.usage.cachedInputTokens,
+            cacheCreationInputTokens: event.usage.cacheWriteTokens,
           };
         }
-
-        // The SDK reports the full agentic-loop cost on the result message.
-        costUsd = message.total_cost_usd;
-
-        // Check for special responses in results too
-        const resultText =
-          (message as any).result || (message as any).message?.result;
+        if (event.costUsd !== undefined) costUsd = event.costUsd;
+        if (event.finalText) finalText = event.finalText;
         if (
-          resultText &&
-          resultText.match(/DO_NOT_RESPOND/i) &&
+          /DO_NOT_RESPOND/i.test(finalText) &&
           slackContext &&
           (await this.shouldHonorDoNotRespond(slackContext))
         ) {
@@ -257,32 +319,51 @@ export class MessageProcessor {
       }
     }
 
-    timings.claude_total_stream_ms = Date.now() - streamStart;
+    if (failed) {
+      if (confirmationDialogPosted) {
+        shouldNotRespond = true;
+      } else {
+        shouldNotRespond = false;
+        doNotRespondOptOut = false;
+        currentMessages.push(GENERIC_FAILURE_MESSAGE);
+      }
+    } else if (currentMessages.length === 0) {
+      if (terminalOutcome?.outcome === "limit" && !finalText.trim()) {
+        currentMessages.push(
+          /budget/i.test(terminalOutcome.reason ?? "")
+            ? "I hit the per-request spending limit before finishing. Please try a narrower request or ask a human to raise the cap."
+            : "I ran out of turns before finishing this task. Please try a narrower request or ask a human to raise the cap.",
+        );
+      } else if (finalText) {
+        currentMessages.push(finalText);
+      }
+    }
 
-    // Log completion summary with token usage and turn count
-    const completionLog: Record<string, unknown> = {
+    timings.agent_total_stream_ms = Date.now() - streamStart;
+    if (runtime.provider === "anthropic") {
+      timings.claude_time_to_first_message_ms =
+        timings.agent_time_to_first_message_ms ?? 0;
+      timings.claude_total_stream_ms = timings.agent_total_stream_ms;
+    }
+
+    this.logger.info("✅ Completed", {
+      provider: runtime.provider,
       msgs: currentMessages.length,
       tools: toolCalls.length,
       turns: turnCount,
-    };
-    if (tokenUsage) {
-      completionLog.inputTokens = tokenUsage.inputTokens;
-      completionLog.outputTokens = tokenUsage.outputTokens;
-      if (tokenUsage.cacheReadInputTokens !== undefined) {
-        completionLog.cacheReadTokens = tokenUsage.cacheReadInputTokens;
-      }
-      if (tokenUsage.cacheCreationInputTokens !== undefined) {
-        completionLog.cacheCreationTokens = tokenUsage.cacheCreationInputTokens;
-      }
-    }
-    if (costUsd !== undefined) {
-      completionLog.costUsd = costUsd;
-    }
-    this.logger.info("✅ Completed", completionLog);
+      ...(tokenUsage
+        ? {
+            inputTokens: tokenUsage.inputTokens,
+            outputTokens: tokenUsage.outputTokens,
+          }
+        : {}),
+      ...(costUsd !== undefined ? { costUsd } : {}),
+    });
 
     return {
       messages: currentMessages,
       shouldNotRespond,
+      failed: failed || undefined,
       doNotRespondOptOut: doNotRespondOptOut || undefined,
       debugLogs: isDebugMode ? debugLogs : undefined,
       toolCalls: toolCalls.length > 0 ? toolCalls : undefined,
@@ -292,234 +373,34 @@ export class MessageProcessor {
       costUsd,
       turnCount: turnCount > 0 ? turnCount : undefined,
       phaseTimings: timings,
+      provider: runtime.provider,
+      model: model.model || undefined,
     };
   }
 
-  /**
-   * Process assistant messages from Claude
-   */
-  private async processAssistantMessage(
-    message: SDKMessage,
-    currentMessages: string[],
-    sessionKey?: string,
+  /** Compatibility wrapper retained while callers migrate to processAgentStream. */
+  async processClaudeStream(
+    prompt: string,
+    session: ConversationSession,
+    abortController: AbortController,
     slackContext?: SlackContext,
-    isDebugMode?: boolean,
-    debugLogs?: string[],
-    toolCallsTracking?: string[],
-    toolNamesTracking?: string[],
+    sessionKey?: string,
+    systemPrompt?: string,
     allowFullLogging?: boolean,
-  ): Promise<void> {
-    // Check if this is a tool use message
-    const hasToolUse = message.message.content?.some(
-      (part: any) => part.type === "tool_use",
+    requestMode?: RequestMode,
+    runtimeTools: RuntimeToolBundle = {},
+  ): Promise<MessageProcessorResult> {
+    return this.processAgentStream(
+      prompt,
+      session,
+      abortController,
+      this.runtimeRegistry.get("anthropic"),
+      slackContext,
+      sessionKey,
+      systemPrompt,
+      allowFullLogging,
+      requestMode,
+      runtimeTools,
     );
-
-    if (hasToolUse) {
-      // Get tool names for logging
-      const toolCalls =
-        message.message.content
-          ?.filter((part: any) => part.type === "tool_use")
-          .map((part: any) => ({
-            name: part.name,
-            parameters: part.input || {},
-          })) || [];
-
-      // Skill invocations are logged as `Skill:<name>` so names-only tracking
-      // (DMs / private channels) still reveals which skill ran. The `skill`
-      // parameter is a fixed enumerated value, not user content.
-      const toolNames = toolCalls.map((t: any) =>
-        t.name === "Skill" && typeof t.parameters?.skill === "string"
-          ? `Skill:${t.parameters.skill}`
-          : t.name,
-      );
-
-      // Format tool call with params
-      const formatToolCall = (t: any) => {
-        const params = Object.entries(t.parameters ?? {})
-          .map(
-            ([k, v]) =>
-              `${k}=${truncateForLog(typeof v === "string" ? v : JSON.stringify(v), TOOL_CALL_PARAM_LOG_MAX_LENGTH)}`,
-          )
-          .join(", ");
-        return params ? `${t.name}(${params})` : `${t.name}()`;
-      };
-
-      const formattedCalls = toolCalls.map(formatToolCall);
-      const fullPreview = formattedCalls.join(" | ");
-
-      // Log with privacy handling: tool names are safe, params are sensitive
-      this.logSensitive(
-        "🔧",
-        { tools: toolNames },
-        fullPreview,
-        allowFullLogging ?? false,
-        isDebugMode,
-        debugLogs,
-      );
-      // Track individual tool calls for analytics (preserves correct count).
-      // Names-only list mirrors the formatted list so tracking can emit the
-      // safe variant for DMs / private channels.
-      if (toolCallsTracking) toolCallsTracking.push(...formattedCalls);
-      if (toolNamesTracking) toolNamesTracking.push(...toolNames);
-
-      if (
-        sessionKey &&
-        slackContext &&
-        (await this.shouldShowReactions(slackContext))
-      ) {
-        await this.reactionManager.updateReaction(
-          sessionKey,
-          REACTIONS.TOOL_USE,
-        );
-      }
-
-      // Extract any text content from tool use messages
-      const content = this.extractTextContent(message);
-      if (content) {
-        this.addSubstantialContent(content, currentMessages, "tool use");
-      }
-    } else {
-      // Handle regular text content
-      const content = this.extractTextContent(message);
-      if (content) {
-        this.addSubstantialContent(content, currentMessages, "assistant");
-      }
-    }
-  }
-
-  /**
-   * Process result messages from Claude
-   */
-  private async processResultMessage(
-    message: SDKMessage,
-    currentMessages: string[],
-  ): Promise<void> {
-    const messageData = (message as any).message || (message as any);
-    const isSuccessfulResult =
-      message.subtype === "success" ||
-      (message.subtype === "error_during_execution" && !messageData.is_error);
-
-    const resultText = (message as any).result || messageData.result;
-    if (isSuccessfulResult && resultText && currentMessages.length === 0) {
-      // Only add result if we don't already have text content from assistant messages
-      currentMessages.push(resultText);
-      return;
-    }
-
-    // Terminal limit results (budget/turns) carry no assistant text. Without a
-    // fallback message the bot sends nothing and the user is left wondering
-    // why it went silent. Surface a clear explanation instead.
-    if (currentMessages.length === 0) {
-      if (message.subtype === "error_max_budget_usd") {
-        currentMessages.push(
-          "I hit the per-request spending limit before finishing. " +
-            "Please try a narrower request or ask a human to raise the cap.",
-        );
-      } else if (message.subtype === "error_max_turns") {
-        currentMessages.push(
-          "I ran out of turns before finishing this task. " +
-            "Please try a narrower request or ask a human to raise the cap.",
-        );
-      }
-    }
-  }
-
-  /**
-   * Process tool result messages (user messages with tool_result content blocks)
-   */
-  private processToolResultMessage(
-    message: SDKMessage,
-    isDebugMode?: boolean,
-    debugLogs?: string[],
-    allowFullLogging?: boolean,
-  ):
-    | { confirmationDialogPosted?: boolean; shouldNotRespond?: boolean }
-    | undefined {
-    const content =
-      (message as any).message?.content || (message as any).content;
-    if (!Array.isArray(content)) return;
-
-    let suppressReply = false;
-    let dialogPosted = false;
-
-    for (const block of content) {
-      if (block.type === "tool_result") {
-        const raw = block.content;
-        const resultContent =
-          typeof raw === "string"
-            ? raw
-            : Array.isArray(raw)
-              ? raw.map((c: any) => c?.text || JSON.stringify(c)).join("")
-              : JSON.stringify(raw ?? "");
-
-        const preview = truncateForLog(
-          resultContent,
-          TOOL_RESPONSE_LOG_MAX_LENGTH,
-        );
-
-        // Log with privacy handling: server logs respect allowFullLogging, debug logs show full
-        this.logSensitive(
-          `📋 Result (${resultContent.length} chars):`,
-          {},
-          preview,
-          allowFullLogging ?? false,
-          isDebugMode,
-          debugLogs,
-        );
-
-        if (CUSTOM_ACTION_SUPPRESSES_REPLY.test(resultContent)) {
-          suppressReply = true;
-          if (/confirmation dialog has been posted/i.test(resultContent)) {
-            dialogPosted = true;
-          }
-        }
-      }
-    }
-
-    if (!suppressReply && !dialogPosted) return;
-    return {
-      confirmationDialogPosted: dialogPosted || undefined,
-      shouldNotRespond: suppressReply || undefined,
-    };
-  }
-
-  /**
-   * Extract text content from Claude message
-   */
-  private extractTextContent(message: SDKMessage): string | null {
-    if (message.type === "assistant" && message.message.content) {
-      const textParts = message.message.content
-        .filter((part: any) => part.type === "text")
-        .map((part: any) => part.text);
-
-      const content = textParts.join("");
-      return content || null;
-    }
-    return null;
-  }
-
-  /**
-   * Add substantial content to messages array (filtering out intermediate steps)
-   */
-  private addSubstantialContent(
-    content: string,
-    messages: string[],
-    sourceType: string,
-  ): void {
-    const minLength = sourceType === "tool use" ? 300 : 500;
-    const isSubstantialContent =
-      content.length > minLength &&
-      (content.includes("##") ||
-        content.includes("###") ||
-        content.includes("Action Plan"));
-    const isIntermediateStep = content.match(/^(Now let me|Let me|I'll)/i);
-
-    if (
-      !messages.includes(content) &&
-      isSubstantialContent &&
-      !isIntermediateStep
-    ) {
-      messages.push(content);
-    }
   }
 }

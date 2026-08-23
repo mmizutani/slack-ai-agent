@@ -1,4 +1,3 @@
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { App } from "@slack/bolt";
 import { Logger } from "./logger";
 
@@ -25,7 +24,7 @@ export interface ModelFallbackEvent {
  * The event's own fields (including any `trigger`) are reported as-is.
  */
 export const detectModelFallback = (
-  message: SDKMessage,
+  message: unknown,
 ): ModelFallbackEvent | undefined => {
   const m = message as any;
   if (m?.type !== "system" || m?.subtype !== "model_fallback") return undefined;
@@ -79,7 +78,7 @@ export class OpusHealthMonitor {
    * `model_fallback` event, log it and emit a throttled ops alert — at most one
    * per cooldown window (default 15 minutes).
    */
-  observe(message: SDKMessage): void {
+  observe(message: unknown): void {
     const event = detectModelFallback(message);
     if (!event) return;
 

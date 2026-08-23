@@ -1,5 +1,5 @@
 // config is imported before tracing so dotenv.config() runs first to set environment variables.
-import { config } from "./config";
+import { config, validateEnabledProviders } from "./config";
 import "./tracing";
 import { App } from "@slack/bolt";
 import { ClaudeHandler } from "./claude-handler";
@@ -12,13 +12,22 @@ import { UserUtils } from "./user-utils";
 import { initTracking } from "./tracking";
 import { ChannelConfigManager } from "./channel-config";
 import { OpusHealthMonitor, buildSlackNotify } from "./opus-health";
+import { SessionManager } from "./sessions/session-manager";
+import { AgentRuntimeRegistry } from "./runtimes/registry";
+import { ClaudeAgentRuntime } from "./runtimes/anthropic/runtime";
+import { OpenAIAgentRuntime } from "./runtimes/openai/runtime";
+import { loadSubagentDefinitions as loadProviderNeutralSubagentDefinitions } from "./subagents/loader";
 
 const logger = new Logger("Main");
 
 async function start() {
   try {
-    logger.info("Starting Claude Code Slack app", {
+    validateEnabledProviders({
+      enabledProviders: config.agent.enabledProviders,
+    });
+    logger.info("Starting Slack AI agent app", {
       debug: config.debug,
+      provider: config.agent.defaultProvider,
     });
 
     const app = new App({
@@ -48,16 +57,33 @@ async function start() {
       notify: buildSlackNotify(app, config.opsAlertChannelId),
     });
 
-    const claudeHandler = new ClaudeHandler(
-      mcpManager,
-      registry,
-      opusHealthMonitor,
-    );
+    const sessionManager = new SessionManager();
+    const runtimeRegistry = new AgentRuntimeRegistry();
+    if (config.agent.enabledProviders.includes("anthropic")) {
+      const claudeHandler = new ClaudeHandler(
+        mcpManager,
+        registry,
+        opusHealthMonitor,
+        sessionManager,
+      );
+      runtimeRegistry.register(new ClaudeAgentRuntime(claudeHandler));
+    }
+    if (config.agent.enabledProviders.includes("openai")) {
+      runtimeRegistry.register(
+        new OpenAIAgentRuntime({
+          subagentDefinitions: loadProviderNeutralSubagentDefinitions(),
+        }),
+      );
+    }
     const slackHandler = new SlackHandler(
       app,
-      claudeHandler,
+      sessionManager,
       reactionManager,
       channelConfigManager,
+      sessionManager,
+      runtimeRegistry,
+      registry,
+      mcpManager,
     );
     slackHandler.setupEventHandlers();
 
@@ -97,7 +123,9 @@ async function start() {
     await app.start();
     UserUtils.startCleanupInterval();
 
-    logger.info("⚡️ Claude Code Slack app is running!", {});
+    logger.info("⚡️ Slack AI agent is running!", {
+      provider: config.agent.defaultProvider,
+    });
     logger.info("Configuration:", {
       debugMode: config.debug,
       baseDirectory: config.baseDirectory,

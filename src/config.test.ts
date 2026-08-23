@@ -5,7 +5,69 @@ import {
   buildSandboxFilesystem,
   destroyThreadWorkspace,
   provisionThreadWorkspace,
+  resolveEnabledProviders,
+  validateEnabledProviders,
 } from "./config";
+
+it("enables both configured providers for mixed deployments", () => {
+  expect(
+    resolveEnabledProviders({
+      defaultProvider: "anthropic",
+      anthropicApiKey: "anthropic-key",
+      openaiApiKey: "openai-key",
+    }),
+  ).toEqual(["anthropic", "openai"]);
+});
+
+it("keeps OpenAI-only deployments free of an Anthropic requirement", () => {
+  expect(
+    resolveEnabledProviders({
+      defaultProvider: "openai",
+      openaiApiKey: "openai-key",
+    }),
+  ).toEqual(["openai"]);
+});
+
+it("allows OpenAI-only validation without an Anthropic credential", () => {
+  expect(() =>
+    validateEnabledProviders({
+      defaultProvider: "openai",
+      anthropicApiKey: undefined,
+      openaiApiKey: "configured",
+    }),
+  ).not.toThrow();
+});
+
+it("accepts an Anthropic auth token without an API key", () => {
+  expect(() =>
+    validateEnabledProviders({
+      defaultProvider: "anthropic",
+      anthropicApiKey: undefined,
+      anthropicAuthToken: "configured",
+      anthropicBaseUrl: "https://anthropic-proxy.example",
+    }),
+  ).not.toThrow();
+});
+
+it("rejects a selected provider with no credential", () => {
+  expect(() =>
+    validateEnabledProviders({
+      defaultProvider: "openai",
+      anthropicApiKey: undefined,
+      openaiApiKey: undefined,
+    }),
+  ).toThrow(/OPENAI_API_KEY/i);
+});
+
+it("rejects a default model from a different provider", () => {
+  expect(() =>
+    validateEnabledProviders({
+      defaultProvider: "openai",
+      defaultModel: { provider: "anthropic", model: "claude-opus-5" },
+      openaiApiKey: "configured",
+    }),
+  ).toThrow(/default model.*provider/i);
+});
 
 it("keeps workspace paths short enough for Linux sandbox sockets", () => {
   const sessionKey =

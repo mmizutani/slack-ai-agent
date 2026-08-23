@@ -15,6 +15,10 @@ jest.mock("./config", () => ({
       signingSecret: "test-secret",
     },
     anthropic: { apiKey: "test-key", model: "claude-opus-5" },
+    agent: {
+      defaultProvider: "anthropic",
+      defaultModel: { provider: "anthropic", model: "claude-opus-5" },
+    },
     slackWorkspaceUrl: "https://test.slack.com",
     baseDirectory: "/tmp/test",
     persistDir: "/tmp/test-persist",
@@ -179,6 +183,68 @@ describe("SlackHandler", () => {
   beforeEach(() => {
     t = createHandler();
     handler = t.handler;
+  });
+
+  it("binds OpenAI workspace tools to the current conversation session", async () => {
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      {
+        channel: "C456",
+        channelType: "channel",
+        user: "U123",
+      },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.workspaceTools).toHaveLength(3);
+    expect((tools.workspaceTools as any[]).map(tool => tool.name)).toEqual([
+      "workspace_read_file",
+      "workspace_list_files",
+      "workspace_search_text",
+    ]);
+  });
+
+  it("passes the role policy even when no MCP server is configured", async () => {
+    (handler as any).mcpManager = {
+      getServerConfiguration: jest.fn().mockReturnValue(undefined),
+      getEffectiveToolPolicy: jest.fn().mockResolvedValue({
+        role: "member",
+        allowed: ["workspace/read_file"],
+        denied: [],
+      }),
+      getHighestRole: jest.fn().mockResolvedValue("member"),
+    };
+
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      { channel: "C456", channelType: "channel", user: "U123" },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.permissionPolicy).toEqual(
+      expect.objectContaining({ allowed: ["workspace/read_file"] }),
+    );
+  });
+
+  it("selects the runtime from a qualified channel model and strips its prefix", () => {
+    expect(
+      priv(handler).resolveEffectiveModel({ model: "openai/gpt-5.6-luna" }),
+    ).toEqual({ provider: "openai", model: "gpt-5.6-luna" });
+  });
+
+  it("records provider-neutral total timing and Claude compatibility timing only for Anthropic", () => {
+    const openaiTimings: Record<string, number> = {};
+    priv(handler).recordAgentTotalTiming(openaiTimings, "openai", 12);
+    expect(openaiTimings).toEqual({ agent_total_ms: 12 });
+
+    const anthropicTimings: Record<string, number> = {};
+    priv(handler).recordAgentTotalTiming(anthropicTimings, "anthropic", 15);
+    expect(anthropicTimings).toEqual({
+      agent_total_ms: 15,
+      claude_total_ms: 15,
+    });
   });
 
   describe("containsSpecialMarkers", () => {
@@ -1064,6 +1130,45 @@ describe("SlackHandler", () => {
         expect.any(String),
         "white_check_mark", // REACTIONS.COMPLETE
       );
+    });
+
+    it("shows ERROR reaction when the runtime reports a failed terminal", async () => {
+      t.channelConfig.isConditionalReplyChannel = jest
+        .fn()
+        .mockResolvedValue(false);
+      const event = makeEvent();
+      const result = {
+        messages: [
+          "❌ Something went wrong while processing your request. Please try again.",
+        ],
+        shouldNotRespond: false,
+        failed: true,
+      };
+
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+
+      expect(t.reactionManager.updateReaction).toHaveBeenCalledWith(
+        expect.any(String),
+        "x", // REACTIONS.ERROR
+      );
+      expect(t.reactionManager.updateReaction).not.toHaveBeenCalledWith(
+        expect.any(String),
+        "white_check_mark",
+      );
+    });
+
+    it("leaves a posted action confirmation reaction under registry ownership after failure", async () => {
+      const event = makeEvent();
+      const result = {
+        messages: [],
+        shouldNotRespond: true,
+        confirmationDialogPosted: true,
+        failed: true,
+      };
+
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+
+      expect(t.reactionManager.updateReaction).not.toHaveBeenCalled();
     });
 
     it("tracks message processed with agentCouldHelp false on DO_NOT_RESPOND", async () => {

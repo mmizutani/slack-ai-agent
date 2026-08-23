@@ -1,11 +1,13 @@
 # Slack AI Agent
 
-A Slack app powered by Claude Code SDK. Responds in DMs, channels, and @-mentions with streaming responses, thread context, file uploads, and extensible MCP tool integrations.
+A provider-neutral Slack agent with Anthropic Claude Agent SDK and OpenAI Agents SDK runtimes. It responds in DMs, channels, and @-mentions with streaming responses, thread context, bounded workspace file tools, and extensible MCP integrations.
 
 ## Architecture
 
 - **`src/slack-handler.ts`** - Message routing and event handling
-- **`src/claude-handler.ts`** - Session management and Claude Code SDK integration
+- **`src/sessions/session-manager.ts`** - Provider-neutral conversation/workspace lifecycle
+- **`src/runtimes/anthropic/`** - Claude Agent SDK runtime and adapters
+- **`src/runtimes/openai/`** - OpenAI Agents SDK runtime and adapters
 - **`src/mcp-manager.ts`** - MCP server configuration and tool management
 - **`src/message-processor.ts`** - Stream processing and response formatting
 - **`src/tracking.ts`** - Analytics tracking for message processing and feedback
@@ -16,9 +18,11 @@ A Slack app powered by Claude Code SDK. Responds in DMs, channels, and @-mention
 
 ### 1. Install
 
+Node.js 22 or newer and pnpm are required.
+
 ```bash
-git clone https://github.com/duolingo/slack-ai-agent.git
-npm install
+git clone https://github.com/mmizutani/slack-ai-agent.git
+pnpm install
 ```
 
 ### 2. Create Slack App
@@ -37,6 +41,35 @@ cp .env.example .env
 ```
 
 Fill in your tokens. See `.env.example` for all available variables.
+
+`AGENT_DEFAULT_PROVIDER` selects the runtime (`anthropic` by default, or
+`openai`). Provider credentials are validated only for enabled runtimes. OpenAI
+uses the Responses-backed `Agent`/`Runner` path; set `OPENAI_BASE_URL` when an
+OpenAI-compatible gateway is required. `SMART_REPLY_MODEL` may be set to a
+qualified model such as `openai/gpt-5.6-luna`; otherwise smart replies use a
+cheap model for the selected provider. Keep `OPENAI_TRACING_ENABLED=false`
+unless tracing data handling has been reviewed.
+
+Deployment modes are selected by which provider credentials are present:
+
+- Anthropic-only: keep `AGENT_DEFAULT_PROVIDER=anthropic` and omit
+  `OPENAI_API_KEY`.
+- OpenAI-only: set `AGENT_DEFAULT_PROVIDER=openai`, use a qualified
+  `AGENT_DEFAULT_MODEL`, and omit Anthropic credentials.
+- Mixed: configure both credentials; qualified channel/request models select
+  the runtime with no automatic fallback.
+
+OpenAI continuation defaults to stored Responses via
+`OPENAI_SESSION_MODE=previous_response_id`. If response storage is disabled,
+set both `OPENAI_STORE_RESPONSES=false` and
+`OPENAI_SESSION_MODE=sdk_session`; invalid combinations fail at startup.
+
+An optional paid smoke check uses the low-cost configured model and never logs
+credentials or provider response bodies:
+
+```bash
+pnpm smoke:openai
+```
 
 ### 4. Configure the Bot
 
@@ -75,9 +108,30 @@ cp config/instructions/example-general-context.txt config/instructions/general-c
 ### 5. Run
 
 ```bash
-npm run dev    # development (auto-reload)
-npm run build && npm run prod  # production
+pnpm dev    # development (auto-reload)
+pnpm run build && pnpm run prod  # production
 ```
+
+### Provider and tool migration
+
+Models may be qualified per channel or request, for example
+`openai/gpt-5.6-luna` or `anthropic/claude-sonnet-5`. Existing unqualified
+Claude model names and legacy tool names remain supported. New provider-neutral
+tool identities are preferred in allowlists:
+
+```yaml
+member:
+  - workspace/read_file
+  - workspace/list_files
+  - workspace/search_text
+  - mcp:slack/slack_search_messages
+```
+
+Global deny rules still win. `Bash(...)` is Anthropic-only and is never mapped
+to OpenAI shell access. OpenAI v1 exposes only bounded workspace read/list/search
+function tools; it does not provide arbitrary shell or file-write tools. Custom
+actions continue to use the existing Slack confirmation workflow, and OpenAI
+subagents are manager-style agents-as-tools intersected with the parent policy.
 
 ## Usage
 
@@ -89,9 +143,9 @@ npm run build && npm run prod  # production
 ## Testing
 
 ```bash
-npm test              # run all tests
-npx jest --watch      # re-run on file changes
-npx jest src/logger   # run tests matching a pattern
+pnpm test --runInBand       # run all tests
+pnpm exec jest --watch      # re-run on file changes
+pnpm exec jest src/logger   # run tests matching a pattern
 ```
 
 Tests use [Jest](https://jestjs.io/) with `ts-jest`. Test files live next to their source files as `*.test.ts`.

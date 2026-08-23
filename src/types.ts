@@ -1,7 +1,26 @@
+export type AgentProviderId = "anthropic" | "openai";
+
+export type ProviderSessionState =
+  | {
+      provider: "anthropic";
+      sessionId?: string;
+    }
+  | {
+      provider: "openai";
+      mode: "previous_response_id" | "sdk_session";
+      previousResponseId?: string;
+      sessionKey?: string;
+    };
+
 export interface ConversationSession {
   userId: string;
   channelId: string;
   threadTs?: string;
+  /** Provider-specific continuation state is isolated by provider. */
+  providerState: Partial<Record<AgentProviderId, ProviderSessionState>>;
+  /** Provider used by the most recent turn in this Slack conversation. */
+  activeProvider?: AgentProviderId;
+  /** @deprecated Use providerState.anthropic.sessionId instead. */
   sessionId?: string;
   /** Per-thread sandbox cwd under /tmp/slack-ai-agent/workspaces/. */
   workingDirectory: string;

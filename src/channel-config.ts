@@ -2,7 +2,7 @@ import { App } from "@slack/bolt";
 import { Logger } from "./logger";
 import { SlackChannelType } from "./types";
 import { CONTEXT_CACHE_TTL_MS } from "./constants";
-import { AllowedModel, ChannelModeConfig, EffortLevel } from "./request-mode";
+import { ChannelModeConfig, EffortLevel, ModelSetting } from "./request-mode";
 import * as fs from "fs";
 import * as path from "path";
 import * as yaml from "js-yaml";
@@ -11,8 +11,8 @@ interface ChannelSettings {
   channelNamePattern: string;
   /** Instruction file (in config/instructions/) appended as channel context. */
   file?: string;
-  /** Per-channel Claude model override (one of the AllowedModel literals). */
-  model?: AllowedModel;
+  /** Per-channel provider/model override. */
+  model?: ModelSetting;
   /** Per-channel effort override. Dropped for models that don't accept effort (e.g. Haiku). */
   effort?: EffortLevel;
   // fastModePattern and fastModeTagBot are OR — either independently enables fast mode.
@@ -121,10 +121,18 @@ export class ChannelConfigManager {
       return cached.data as ChannelConfig;
     }
 
-    const configContent = fs.readFileSync(
-      path.resolve("config/channels.yaml"),
-      "utf-8",
-    );
+    const configuredPath = path.resolve("config/channels.yaml");
+    const configExists = fs.existsSync(configuredPath);
+    const configPath = configExists
+      ? configuredPath
+      : path.resolve("config/example-channels.yaml");
+    if (!configExists) {
+      this.logger.warn(
+        "Configured channel config is missing; using example config",
+        { configuredPath, fallbackPath: configPath },
+      );
+    }
+    const configContent = fs.readFileSync(configPath, "utf-8");
     const loadedConfig = yaml.load(configContent) as ChannelConfig;
 
     this.configCache.set(cacheKey, { data: loadedConfig, fetchedAt: now });
@@ -141,10 +149,20 @@ export class ChannelConfigManager {
       return cached.data as string;
     }
 
-    const context = fs.readFileSync(
-      path.resolve("config/instructions/general-context.txt"),
-      "utf-8",
+    const configuredPath = path.resolve(
+      "config/instructions/general-context.txt",
     );
+    const contextExists = fs.existsSync(configuredPath);
+    const contextPath = contextExists
+      ? configuredPath
+      : path.resolve("config/instructions/example-general-context.txt");
+    if (!contextExists) {
+      this.logger.warn(
+        "Configured general context is missing; using example context",
+        { configuredPath, fallbackPath: contextPath },
+      );
+    }
+    const context = fs.readFileSync(contextPath, "utf-8");
     this.configCache.set(cacheKey, { data: context, fetchedAt: now });
     this.logger.debug("Loaded general context from local file");
     return context;

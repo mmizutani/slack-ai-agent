@@ -2,7 +2,11 @@ import {
   passesSmartReplyStructuralFilter,
   buildClassifierPrompt,
   parseClassifierDecision,
+  classifySmartReplyCandidate,
+  createConfiguredTextClassifier,
 } from "./smart-reply-filter";
+import type { TextClassifierBackend } from "./agent/text-classifier";
+import { ProviderTextClassifier } from "./agent/text-classifier";
 
 describe("passesSmartReplyStructuralFilter", () => {
   it("rejects undefined and empty text", () => {
@@ -88,5 +92,70 @@ describe("buildClassifierPrompt", () => {
     const prompt = buildClassifierPrompt("can someone open a PR for me");
     expect(prompt).toContain("can someone open a PR for me");
     expect(prompt).toContain("YES or NO");
+  });
+});
+
+describe("provider-neutral classifier", () => {
+  it("selects an OpenAI backend for an OpenAI classifier model", () => {
+    const classifier = createConfiguredTextClassifier({
+      provider: "openai",
+      model: "gpt-5.6-luna",
+    });
+
+    expect(classifier.constructor.name).toBe("ProviderTextClassifier");
+    expect((classifier as any).backend.constructor.name).toBe(
+      "OpenAITextClassifierBackend",
+    );
+  });
+
+  it("keeps the model used to select the configured backend", async () => {
+    const classifier = createConfiguredTextClassifier({
+      provider: "openai",
+      model: "gpt-5.6-luna",
+    });
+    const classify = jest.fn().mockResolvedValue({ text: "YES" });
+    (classifier as any).backend = { classify };
+
+    await classifier.classify("classify me", {
+      model: { provider: "anthropic", model: "claude-opus-5" },
+      signal: new AbortController().signal,
+    });
+
+    expect(classify).toHaveBeenCalledWith(
+      "classify me",
+      expect.objectContaining({
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+      }),
+    );
+  });
+
+  it("passes a one-shot no-tool request to the selected backend", async () => {
+    const classify = jest.fn().mockResolvedValue({ text: "YES" });
+    const classifier = new ProviderTextClassifier({
+      classify,
+    } satisfies TextClassifierBackend);
+
+    await expect(
+      classifySmartReplyCandidate("can you investigate this?", classifier),
+    ).resolves.toEqual({ couldHelp: true, costUsd: undefined });
+    expect(classify).toHaveBeenCalledWith(
+      expect.stringContaining("can you investigate this?"),
+      expect.objectContaining({
+        tools: [],
+        continuation: false,
+        model: expect.anything(),
+        signal: expect.any(AbortSignal),
+      }),
+    );
+  });
+
+  it("fails closed when the provider classifier errors", async () => {
+    const classifier = new ProviderTextClassifier({
+      classify: jest.fn().mockRejectedValue(new Error("provider unavailable")),
+    });
+
+    await expect(
+      classifySmartReplyCandidate("can you investigate this?", classifier),
+    ).resolves.toEqual({ couldHelp: false });
   });
 });

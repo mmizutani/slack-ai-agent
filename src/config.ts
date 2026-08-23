@@ -4,6 +4,7 @@ import fs from "fs";
 import os from "os";
 import path from "path";
 import { OPUS_MODEL } from "./request-mode";
+import { AgentProviderId, ModelRef, parseModelRef } from "./agent/model";
 
 dotenv.config();
 
@@ -141,6 +142,122 @@ export const SANDBOX_NETWORK = {
   allowedDomains: ["*.googleapis.com", "*.amazonaws.com", "169.254.169.254"],
 };
 
+function parseProvider(value: string | undefined): AgentProviderId {
+  if (!value || value === "anthropic") return "anthropic";
+  if (value === "openai") return "openai";
+  throw new Error(`Invalid AGENT_DEFAULT_PROVIDER: ${value}`);
+}
+
+const defaultProvider = parseProvider(process.env.AGENT_DEFAULT_PROVIDER);
+const defaultModel: ModelRef = parseModelRef(
+  process.env.AGENT_DEFAULT_MODEL ||
+    (defaultProvider === "openai"
+      ? `openai/${process.env.OPENAI_MODEL || "gpt-5.6-luna"}`
+      : OPUS_MODEL),
+);
+
+export interface ProviderValidationOptions {
+  defaultProvider?: AgentProviderId;
+  defaultModel?: ModelRef;
+  enabledProviders?: AgentProviderId[];
+  anthropicApiKey?: string;
+  openaiApiKey?: string;
+  openaiStoreResponses?: boolean;
+  openaiSessionMode?: "previous_response_id" | "sdk_session";
+  anthropicBaseUrl?: string;
+  anthropicAuthToken?: string;
+}
+
+export function resolveEnabledProviders(
+  options: Pick<
+    ProviderValidationOptions,
+    | "defaultProvider"
+    | "anthropicApiKey"
+    | "anthropicAuthToken"
+    | "openaiApiKey"
+  >,
+): AgentProviderId[] {
+  const enabled = new Set<AgentProviderId>([
+    options.defaultProvider ?? "anthropic",
+  ]);
+  if (options.anthropicApiKey || options.anthropicAuthToken) {
+    enabled.add("anthropic");
+  }
+  if (options.openaiApiKey) enabled.add("openai");
+  return (["anthropic", "openai"] as const).filter(provider =>
+    enabled.has(provider),
+  );
+}
+
+/** Validate only providers selected by deployment configuration. */
+export function validateEnabledProviders(
+  options: ProviderValidationOptions = {},
+): void {
+  const selected =
+    options.enabledProviders ??
+    (options.defaultProvider
+      ? resolveEnabledProviders({
+          defaultProvider: options.defaultProvider,
+          anthropicApiKey: options.anthropicApiKey,
+          anthropicAuthToken: options.anthropicAuthToken,
+          openaiApiKey: options.openaiApiKey,
+        })
+      : config.agent.enabledProviders);
+  const anthropicApiKey =
+    "anthropicApiKey" in options
+      ? options.anthropicApiKey
+      : config.anthropic.apiKey;
+  const anthropicAuthToken =
+    "anthropicAuthToken" in options
+      ? options.anthropicAuthToken
+      : config.anthropic.authToken;
+  const anthropicBaseUrl =
+    "anthropicBaseUrl" in options
+      ? options.anthropicBaseUrl
+      : config.anthropic.baseUrl;
+  const openaiApiKey =
+    "openaiApiKey" in options ? options.openaiApiKey : config.openai.apiKey;
+  const configuredDefaultProvider =
+    options.defaultProvider ?? config.agent.defaultProvider;
+  const configuredDefaultModel =
+    options.defaultModel ??
+    (options.defaultProvider ? undefined : config.agent.defaultModel);
+
+  if (
+    configuredDefaultModel &&
+    configuredDefaultModel.provider !== configuredDefaultProvider
+  ) {
+    throw new Error(
+      `Default model provider ${configuredDefaultModel.provider} does not match default provider ${configuredDefaultProvider}`,
+    );
+  }
+
+  if (selected.includes("anthropic")) {
+    if (!anthropicApiKey && !anthropicAuthToken) {
+      throw new Error(
+        "Anthropic runtime is enabled but ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is missing",
+      );
+    }
+    if (anthropicAuthToken && !anthropicBaseUrl) {
+      throw new Error(
+        "ANTHROPIC_BASE_URL is required when using ANTHROPIC_AUTH_TOKEN",
+      );
+    }
+  }
+  if (selected.includes("openai") && !openaiApiKey) {
+    throw new Error("OpenAI runtime is enabled but OPENAI_API_KEY is missing");
+  }
+
+  const storeResponses =
+    options.openaiStoreResponses ?? config.openai.storeResponses;
+  const sessionMode = options.openaiSessionMode ?? config.openai.sessionMode;
+  if (!storeResponses && sessionMode === "previous_response_id") {
+    throw new Error(
+      "OPENAI_STORE_RESPONSES=false requires OPENAI_SESSION_MODE=sdk_session",
+    );
+  }
+}
+
 export const config = {
   slack: {
     botToken: getRequiredEnv("CC_SLACK_BOT_TOKEN"),
@@ -148,22 +265,37 @@ export const config = {
     signingSecret: getRequiredEnv("CC_SLACK_SIGNING_SECRET"),
   },
   anthropic: {
-    apiKey: (() => {
-      if (process.env.ANTHROPIC_API_KEY) return process.env.ANTHROPIC_API_KEY;
-      if (process.env.ANTHROPIC_AUTH_TOKEN) {
-        if (!process.env.ANTHROPIC_BASE_URL) {
-          throw new Error(
-            "ANTHROPIC_BASE_URL is required when using ANTHROPIC_AUTH_TOKEN",
-          );
-        }
-        return process.env.ANTHROPIC_AUTH_TOKEN;
-      }
-      throw new Error(
-        "Missing required environment variable: set ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN + ANTHROPIC_BASE_URL",
-      );
-    })(),
+    apiKey: process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_AUTH_TOKEN,
+    authToken: process.env.ANTHROPIC_AUTH_TOKEN,
+    baseUrl: process.env.ANTHROPIC_BASE_URL,
     model: OPUS_MODEL, // Claude Opus 5 - most capable model
   },
+  agent: {
+    defaultProvider,
+    defaultModel,
+    enabledProviders: resolveEnabledProviders({
+      defaultProvider,
+      anthropicApiKey: process.env.ANTHROPIC_API_KEY,
+      anthropicAuthToken: process.env.ANTHROPIC_AUTH_TOKEN,
+      openaiApiKey: process.env.OPENAI_API_KEY,
+    }),
+  },
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+    baseUrl: process.env.OPENAI_BASE_URL,
+    organization: process.env.OPENAI_ORGANIZATION,
+    project: process.env.OPENAI_PROJECT,
+    model: process.env.OPENAI_MODEL || "gpt-5.6-luna",
+    sessionMode:
+      process.env.OPENAI_SESSION_MODE === "sdk_session"
+        ? ("sdk_session" as const)
+        : ("previous_response_id" as const),
+    tracingEnabled: process.env.OPENAI_TRACING_ENABLED === "true",
+    storeResponses: process.env.OPENAI_STORE_RESPONSES !== "false",
+  },
+  smartReplyModel: process.env.SMART_REPLY_MODEL
+    ? parseModelRef(process.env.SMART_REPLY_MODEL)
+    : undefined,
   slackWorkspaceUrl: getRequiredEnv("SLACK_WORKSPACE_URL"),
   // Optional Slack channel for operational alerts (e.g. model fallback). When
   // unset, no ops notifications are sent. Set OPS_ALERT_CHANNEL_ID in the

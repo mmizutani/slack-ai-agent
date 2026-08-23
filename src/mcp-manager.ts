@@ -3,6 +3,7 @@ import * as path from "path";
 import { Logger } from "./logger";
 import { CONTEXT_CACHE_TTL_MS } from "./constants";
 import * as yaml from "js-yaml";
+import { computeEffectiveToolPolicy, legacyToolIdentities } from "./mcp/permissions";
 
 /**
  * Tool allowlist loaded from config/tool-allowlist.yaml.
@@ -301,7 +302,33 @@ export class McpManager {
       }
     }
 
-    return tools;
+    const denied = new Set(
+      this.getDisallowedTools().flatMap(tool => {
+        const identities = legacyToolIdentities(tool);
+        return identities.length > 0 ? identities : [tool];
+      }),
+    );
+    return tools.filter(tool => {
+      const identities = legacyToolIdentities(tool);
+      const comparable = identities.length > 0 ? identities : [tool];
+      return comparable.every(identity =>
+        !denied.has(identity) &&
+        !(
+          identity.startsWith("provider_native:anthropic/Bash(") &&
+          denied.has("provider_native:anthropic/Bash")
+        ),
+      );
+    });
+  }
+
+  /** Canonical role policy used by provider adapters. */
+  async getEffectiveToolPolicy(role: string) {
+    const allowlist = await this.loadToolAllowlist();
+    return computeEffectiveToolPolicy(
+      role,
+      allowlist,
+      this.getDisallowedTools(),
+    );
   }
 
   // Retry loading denylist every 30s on error so fixes are picked up quickly

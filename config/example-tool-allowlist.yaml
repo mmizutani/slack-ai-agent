@@ -11,6 +11,13 @@
 
 # Tools available to all members (lowest privilege)
 member:
+  # Provider-neutral bounded OpenAI workspace tools (opt in explicitly).
+  - workspace/read_file
+  - workspace/list_files
+  - workspace/search_text
+  # Custom actions are fail-closed and must be granted by canonical identity.
+  # - action:custom-actions/create-ticket
+
   # Claude SDK native tools
   - BashOutput
   - ExitPlanMode
