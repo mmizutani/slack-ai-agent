@@ -1,10 +1,11 @@
 import dotenv from "dotenv";
 import { Agent, OpenAIProvider, Runner, tool } from "@openai/agents";
 import { z } from "zod";
+import { resolveOpenAIModel } from "../src/runtimes/openai/model-config";
 
 dotenv.config({ quiet: true });
 
-const MODEL = "gpt-5.6-luna";
+const MODEL = resolveOpenAIModel();
 
 async function main(): Promise<void> {
   const apiKey = process.env.OPENAI_API_KEY;

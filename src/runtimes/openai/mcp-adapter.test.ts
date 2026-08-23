@@ -1,5 +1,5 @@
 import type { ResolvedMcpServerDefinition } from "../../mcp/types";
-import { AgentConfigurationError } from "../../agent/errors";
+import { MCPServerSSE } from "@openai/agents";
 import { resolveMcpServers } from "../../mcp/resolver";
 import { buildOpenAIMcpServers } from "./mcp-adapter";
 
@@ -48,17 +48,54 @@ describe("OpenAI MCP adapter", () => {
     expect(await httpOptions.toolFilter({}, { name: "delete_repo" })).toBe(false);
   });
 
-  it("fails closed for legacy SSE instead of silently changing transport", () => {
-    expect(() =>
-      buildOpenAIMcpServers([
-        {
-          name: "legacy",
-          transport: "sse",
-          url: "https://mcp.example.test/sse",
-          legacy: true,
-        },
-      ], { allowed: [], denied: [] }),
-    ).toThrow(AgentConfigurationError);
+  it("maps legacy SSE with headers and canonical tool filtering", async () => {
+    const sse = jest.fn((options: unknown) => ({
+      kind: "sse",
+      options,
+      close: jest.fn().mockResolvedValue(undefined),
+    }));
+
+    const bundle = buildOpenAIMcpServers([
+      {
+        name: "legacy_search",
+        transport: "sse",
+        url: "https://mcp.example.test/sse",
+        headers: { Authorization: "Bearer redacted" },
+        legacy: true,
+      },
+    ], {
+      allowed: ["mcp:legacy_search/search"],
+      denied: [],
+    }, {
+      stdio: jest.fn(),
+      streamableHttp: jest.fn(),
+      sse,
+    } as any);
+
+    expect(bundle.servers).toHaveLength(1);
+    expect(sse).toHaveBeenCalledWith(expect.objectContaining({
+      name: "legacy_search",
+      url: "https://mcp.example.test/sse",
+      requestInit: { headers: { Authorization: "Bearer redacted" } },
+      toolFilter: expect.any(Function),
+    }));
+    const options = sse.mock.calls[0]?.[0] as any;
+    expect(await options.toolFilter({}, { name: "search" })).toBe(true);
+    expect(await options.toolFilter({}, { name: "delete" })).toBe(false);
+  });
+
+  it("constructs the installed SDK legacy SSE server", async () => {
+    const bundle = buildOpenAIMcpServers([
+      {
+        name: "legacy",
+        transport: "sse",
+        url: "https://mcp.example.test/sse",
+        legacy: true,
+      },
+    ], { allowed: [], denied: [] });
+
+    expect(bundle.servers[0]).toBeInstanceOf(MCPServerSSE);
+    await bundle.close();
   });
 
   it("closes every request-scoped MCP server", async () => {

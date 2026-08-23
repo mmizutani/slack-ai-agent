@@ -1397,6 +1397,7 @@ export class SlackHandler {
         workflowId: slackContext.workflowId,
         botId: slackContext.botId,
         reactionKey: slackContext.reactionKey,
+        workingDirectory: session.workingDirectory,
       };
       tools.actionDefinitions = this.customActionRegistry.getActionToolDefinitions(
         context,

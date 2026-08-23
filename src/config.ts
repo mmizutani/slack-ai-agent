@@ -5,6 +5,7 @@ import os from "os";
 import path from "path";
 import { OPUS_MODEL } from "./request-mode";
 import { AgentProviderId, ModelRef, parseModelRef } from "./agent/model";
+import { resolveOpenAIModel } from "./runtimes/openai/model-config";
 
 dotenv.config();
 
@@ -152,7 +153,7 @@ const defaultProvider = parseProvider(process.env.AGENT_DEFAULT_PROVIDER);
 const defaultModel: ModelRef = parseModelRef(
   process.env.AGENT_DEFAULT_MODEL ||
     (defaultProvider === "openai"
-      ? `openai/${process.env.OPENAI_MODEL || "gpt-5.6-luna"}`
+      ? `openai/${resolveOpenAIModel()}`
       : OPUS_MODEL),
 );
 
@@ -166,6 +167,7 @@ export interface ProviderValidationOptions {
   openaiSessionMode?: "previous_response_id" | "sdk_session";
   anthropicBaseUrl?: string;
   anthropicAuthToken?: string;
+  smartReplyModel?: ModelRef;
 }
 
 export function resolveEnabledProviders(
@@ -193,7 +195,7 @@ export function resolveEnabledProviders(
 export function validateEnabledProviders(
   options: ProviderValidationOptions = {},
 ): void {
-  const selected =
+  const configuredProviders =
     options.enabledProviders ??
     (options.defaultProvider
       ? resolveEnabledProviders({
@@ -203,6 +205,12 @@ export function validateEnabledProviders(
           openaiApiKey: options.openaiApiKey,
         })
       : config.agent.enabledProviders);
+  const smartReplyModel =
+    "smartReplyModel" in options
+      ? options.smartReplyModel
+      : config.smartReplyModel;
+  const selected = new Set(configuredProviders);
+  if (smartReplyModel) selected.add(smartReplyModel.provider);
   const anthropicApiKey =
     "anthropicApiKey" in options
       ? options.anthropicApiKey
@@ -232,7 +240,7 @@ export function validateEnabledProviders(
     );
   }
 
-  if (selected.includes("anthropic")) {
+  if (selected.has("anthropic")) {
     if (!anthropicApiKey && !anthropicAuthToken) {
       throw new Error(
         "Anthropic runtime is enabled but ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN is missing",
@@ -244,7 +252,7 @@ export function validateEnabledProviders(
       );
     }
   }
-  if (selected.includes("openai") && !openaiApiKey) {
+  if (selected.has("openai") && !openaiApiKey) {
     throw new Error("OpenAI runtime is enabled but OPENAI_API_KEY is missing");
   }
 
@@ -285,7 +293,7 @@ export const config = {
     baseUrl: process.env.OPENAI_BASE_URL,
     organization: process.env.OPENAI_ORGANIZATION,
     project: process.env.OPENAI_PROJECT,
-    model: process.env.OPENAI_MODEL || "gpt-5.6-luna",
+    model: resolveOpenAIModel(),
     sessionMode:
       process.env.OPENAI_SESSION_MODE === "sdk_session"
         ? ("sdk_session" as const)

@@ -4,7 +4,6 @@ import {
   MCPServerStreamableHttp,
   type MCPServer,
 } from "@openai/agents";
-import { AgentConfigurationError } from "../../agent/errors";
 import type { EffectiveToolPolicy } from "../../mcp/permissions";
 import type { ResolvedMcpServerDefinition } from "../../mcp/types";
 
@@ -73,8 +72,15 @@ export function buildOpenAIMcpServers(
           }),
         );
       } else {
-        throw new AgentConfigurationError(
-          `OpenAI Agents SDK does not enable legacy SSE MCP transport: ${definition.name}`,
+        servers.push(
+          factories.sse({
+            name: definition.name,
+            url: definition.url,
+            ...(definition.headers && {
+              requestInit: { headers: definition.headers },
+            }),
+            toolFilter: filter,
+          }),
         );
       }
     }

@@ -69,6 +69,40 @@ it("rejects a default model from a different provider", () => {
   ).toThrow(/default model.*provider/i);
 });
 
+it.each([
+  {
+    name: "Anthropic",
+    options: {
+      defaultProvider: "openai" as const,
+      openaiApiKey: "configured",
+      anthropicApiKey: undefined,
+      smartReplyModel: {
+        provider: "anthropic" as const,
+        model: "claude-haiku-4-5",
+      },
+    },
+    credential: /ANTHROPIC_API_KEY|ANTHROPIC_AUTH_TOKEN/i,
+  },
+  {
+    name: "OpenAI",
+    options: {
+      defaultProvider: "anthropic" as const,
+      anthropicApiKey: "configured",
+      openaiApiKey: undefined,
+      smartReplyModel: {
+        provider: "openai" as const,
+        model: "gpt-5.6-luna",
+      },
+    },
+    credential: /OPENAI_API_KEY/i,
+  },
+])(
+  "rejects a $name smart-reply model without its provider credential",
+  ({ options, credential }) => {
+    expect(() => validateEnabledProviders(options)).toThrow(credential);
+  },
+);
+
 it("keeps workspace paths short enough for Linux sandbox sockets", () => {
   const sessionKey =
     "synthetic-user-identifier-synthetic-channel-identifier-1234567890.123456";

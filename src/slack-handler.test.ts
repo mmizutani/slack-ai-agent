@@ -205,6 +205,29 @@ describe("SlackHandler", () => {
     ]);
   });
 
+  it("passes the conversation workspace to OpenAI custom actions", async () => {
+    const getActionToolDefinitions = jest.fn().mockReturnValue([]);
+    (handler as any).customActionRegistry = { getActionToolDefinitions };
+
+    await priv(handler).buildRuntimeTools(
+      "openai",
+      {
+        channel: "C456",
+        channelType: "channel",
+        user: "U123",
+      },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(getActionToolDefinitions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workingDirectory: "/tmp/session-workspace",
+      }),
+      expect.any(Function),
+    );
+  });
+
   it("passes the role policy even when no MCP server is configured", async () => {
     (handler as any).mcpManager = {
       getServerConfiguration: jest.fn().mockReturnValue(undefined),

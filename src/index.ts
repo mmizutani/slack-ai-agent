@@ -24,6 +24,7 @@ async function start() {
   try {
     validateEnabledProviders({
       enabledProviders: config.agent.enabledProviders,
+      smartReplyModel: config.smartReplyModel,
     });
     logger.info("Starting Slack AI agent app", {
       debug: config.debug,
