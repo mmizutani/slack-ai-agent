@@ -1,17 +1,19 @@
 import {
   Agent,
   MemorySession,
+  type MCPServer,
   type Runner,
   type Session,
 } from "@openai/agents";
-import type { AgentRunRequest } from "../../agent/events";
+import type {
+  AgentRunRequest,
+  RuntimeMcpServerHandle,
+} from "../../agent/events";
 import type { AgentRuntime } from "../../agent/runtime";
-import type { ActionToolDefinition } from "../../custom-actions/tool-definitions";
 import { config } from "../../config";
 import { buildOpenAIFunctionTools } from "./action-adapter";
 import { buildOpenAIMcpServers } from "./mcp-adapter";
 import { buildOpenAIWorkspaceTools } from "./workspace-adapter";
-import type { ResolvedMcpServerDefinition } from "../../mcp/types";
 import type { SubagentDefinition } from "../../subagents/types";
 import { buildOpenAISubagentTools } from "./subagent-adapter";
 import {
@@ -90,7 +92,7 @@ export class OpenAIAgentRuntime implements AgentRuntime {
    * combined connect against both.
    */
   private async connectMcpServers(
-    servers: readonly any[],
+    servers: readonly RuntimeMcpServerHandle[],
     signal: AbortSignal,
   ): Promise<void> {
     if (servers.length === 0) return;
@@ -122,7 +124,7 @@ export class OpenAIAgentRuntime implements AgentRuntime {
   /** Release every request-scoped MCP server, whichever set it came from. */
   private async closeMcpServers(
     mcpBundle: { close(): Promise<void> },
-    configuredMcpServers: readonly any[],
+    configuredMcpServers: readonly RuntimeMcpServerHandle[],
   ): Promise<void> {
     await mcpBundle.close();
     await Promise.allSettled(
@@ -143,30 +145,20 @@ export class OpenAIAgentRuntime implements AgentRuntime {
     }
 
     const model = request.model.model || config.openai.model;
-    const actionDefinitions = Array.isArray(request.tools.actionDefinitions)
-      ? (request.tools.actionDefinitions as ActionToolDefinition[])
-      : [];
-    const mcpDefinitions = Array.isArray(request.tools.mcpDefinitions)
-      ? (request.tools.mcpDefinitions as ResolvedMcpServerDefinition[])
-      : [];
-    const configuredPermissionPolicy = (request.tools.permissionPolicy ??
-      request.permissions) as
-      | { allowed?: string[]; denied?: string[] }
-      | undefined;
-    const permissionPolicy = (configuredPermissionPolicy ?? {
-      allowed: [],
-      denied: [],
-    }) as { allowed: string[]; denied: string[] };
+    const actionDefinitions = request.tools.actionDefinitions ?? [];
+    const mcpDefinitions = request.tools.mcpDefinitions ?? [];
+    const configuredPermissionPolicy =
+      request.tools.permissionPolicy ?? request.permissions;
+    const permissionPolicy = {
+      allowed: [...(configuredPermissionPolicy?.allowed ?? [])],
+      denied: [...(configuredPermissionPolicy?.denied ?? [])],
+    };
     const mcpBundle = buildOpenAIMcpServers(mcpDefinitions, permissionPolicy);
-    let configuredMcpServers: any[] = [];
+    let configuredMcpServers: readonly RuntimeMcpServerHandle[] = [];
     let agent: any;
     try {
-      configuredMcpServers = Array.isArray(request.tools.mcpServers)
-        ? (request.tools.mcpServers as any[])
-        : [];
-      const workspaceDefinitions = Array.isArray(request.tools.workspaceTools)
-        ? (request.tools.workspaceTools as any[])
-        : [];
+      configuredMcpServers = request.tools.mcpServers ?? [];
+      const workspaceDefinitions = request.tools.workspaceTools ?? [];
       const providerTools = buildOpenAIWorkspaceTools(
         workspaceDefinitions,
         permissionPolicy,
@@ -175,11 +167,8 @@ export class OpenAIAgentRuntime implements AgentRuntime {
         actionDefinitions,
         permissionPolicy,
       );
-      const subagentDefinitions = Array.isArray(
-        request.tools.subagentDefinitions,
-      )
-        ? (request.tools.subagentDefinitions as SubagentDefinition[])
-        : this.subagentDefinitions;
+      const subagentDefinitions =
+        request.tools.subagentDefinitions ?? this.subagentDefinitions;
       const subagentTools = buildOpenAISubagentTools(
         subagentDefinitions,
         permissionPolicy,
@@ -200,7 +189,12 @@ export class OpenAIAgentRuntime implements AgentRuntime {
           ...(request.effort ? { reasoning: { effort: request.effort } } : {}),
         },
         tools: [...providerTools, ...actionTools, ...subagentTools],
-        mcpServers: [...mcpBundle.servers, ...configuredMcpServers],
+        // Pre-constructed servers are provider-specific by contract; core only
+        // models their lifecycle, so widen them back for the SDK here.
+        mcpServers: [
+          ...mcpBundle.servers,
+          ...(configuredMcpServers as MCPServer[]),
+        ],
       });
     } catch (error) {
       await mcpBundle.close();

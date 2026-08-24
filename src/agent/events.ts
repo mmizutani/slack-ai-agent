@@ -70,8 +70,31 @@ export const DENY_ALL_TOOL_POLICY: EffectiveToolPolicy = Object.freeze({
   denied: Object.freeze([]) as readonly string[],
 });
 
+/**
+ * A pre-constructed, provider-specific MCP server handed to a runtime ready to
+ * use. Core only ever drives its lifecycle, so the shape stays structural
+ * rather than importing a provider SDK type.
+ */
+export interface RuntimeMcpServerHandle {
+  connect?(): Promise<void>;
+  close?(): Promise<void>;
+}
+
+/**
+ * Request-scoped tools built before SDK construction and handed to a runtime.
+ *
+ * The fields are declared rather than left to an index signature so the
+ * producer and every runtime consumer are checked against the same contract: a
+ * misspelled field is a compile error, and consumers no longer cast each value
+ * back from `unknown`.
+ */
 export interface RuntimeToolBundle {
-  [name: string]: unknown;
+  workspaceTools?: readonly import("../workspace/tools").WorkspaceToolDefinition[];
+  actionDefinitions?: readonly import("../custom-actions/tool-definitions").ActionToolDefinition[];
+  mcpDefinitions?: readonly import("../mcp/types").ResolvedMcpServerDefinition[];
+  subagentDefinitions?: readonly import("../subagents/types").SubagentDefinition[];
+  mcpServers?: readonly RuntimeMcpServerHandle[];
+  permissionPolicy?: EffectiveToolPolicy;
 }
 
 export interface AgentRunRequest {
