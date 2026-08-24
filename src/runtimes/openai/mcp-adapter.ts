@@ -3,20 +3,30 @@ import {
   MCPServerStdio,
   MCPServerStreamableHttp,
   type MCPServer,
+  type MCPToolFilterCallable,
 } from "@openai/agents";
 import type { EffectiveToolPolicy } from "../../mcp/permissions";
 import type { ResolvedMcpServerDefinition } from "../../mcp/types";
 
+// Take each factory's option type straight from the SDK constructor so a typo
+// in command/args/env/url/name or a wrong toolFilter shape fails to compile.
+// requestInit is still typed `any` in @openai/agents 0.17.0.
+type StdioOptions = ConstructorParameters<typeof MCPServerStdio>[0];
+type StreamableHttpOptions = ConstructorParameters<
+  typeof MCPServerStreamableHttp
+>[0];
+type SSEOptions = ConstructorParameters<typeof MCPServerSSE>[0];
+
 interface OpenAIMcpFactories {
-  stdio(options: Record<string, unknown>): MCPServer;
-  streamableHttp(options: Record<string, unknown>): MCPServer;
-  sse(options: Record<string, unknown>): MCPServer;
+  stdio(options: StdioOptions): MCPServer;
+  streamableHttp(options: StreamableHttpOptions): MCPServer;
+  sse(options: SSEOptions): MCPServer;
 }
 
 const defaultFactories: OpenAIMcpFactories = {
-  stdio: options => new MCPServerStdio(options as any),
-  streamableHttp: options => new MCPServerStreamableHttp(options as any),
-  sse: options => new MCPServerSSE(options as any),
+  stdio: options => new MCPServerStdio(options),
+  streamableHttp: options => new MCPServerStreamableHttp(options),
+  sse: options => new MCPServerSSE(options),
 };
 
 export interface OpenAIMcpBundle {
@@ -31,7 +41,7 @@ function canonicalToolName(server: string, name: string): string {
 function toolFilter(
   server: string,
   policy: Pick<EffectiveToolPolicy, "allowed" | "denied">,
-): (context: unknown, tool: { name: string }) => Promise<boolean> {
+): MCPToolFilterCallable {
   const allowed = new Set(policy.allowed ?? []);
   const denied = new Set(policy.denied ?? []);
   return async (_context, candidate) => {
