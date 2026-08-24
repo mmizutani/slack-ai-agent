@@ -10,4 +10,7 @@ repos:
     rev: 1.8.0
     hooks:
       - id: duolingo
-        exclude: config.yaml
+        # pnpm rewrites pnpm-lock.yaml in its own YAML style on every
+        # install; letting the formatter restyle it afterwards turns each
+        # dependency change into a whole-file diff.
+        exclude: (config\.yaml|^pnpm-lock\.yaml$)
