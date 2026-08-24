@@ -154,6 +154,28 @@ function containsToolUse(message: unknown): boolean {
   );
 }
 
+/**
+ * True once a message carries assistant-authored text. Such text is already
+ * accumulated into the reply by MessageProcessor, so a retry after this point
+ * would concatenate a second attempt's answer onto the first.
+ */
+function containsAssistantText(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const value = message as any;
+  if (value.type !== "assistant") return false;
+  const content = value.message?.content ?? value.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block: any) =>
+        block?.type === "text" &&
+        typeof block.text === "string" &&
+        block.text.trim().length > 0,
+    )
+  );
+}
+
 export class ClaudeHandler {
   private logger = new Logger("ClaudeHandler");
   private mcpManager: McpManager;
@@ -247,6 +269,7 @@ export class ClaudeHandler {
       globalAttempt++
     ) {
       let toolUseObserved = false;
+      let assistantOutputObserved = false;
       try {
         for await (const message of await this.executeStreamQueryWithRetry(
           prompt,
@@ -258,12 +281,16 @@ export class ClaudeHandler {
           requestMode,
         )) {
           toolUseObserved ||= containsToolUse(message);
+          assistantOutputObserved ||= containsAssistantText(message);
           yield message;
         }
         return;
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
-        if (toolUseObserved) throw error;
+        // A retry replays the original prompt. Anything already exposed to the
+        // consumer stays in the reply, so retrying after a side effect or after
+        // assistant text would duplicate or contradict what the user already saw.
+        if (toolUseObserved || assistantOutputObserved) throw error;
         if (globalAttempt === this.retryOptions.maxRetries) throw error;
 
         // Clear session ID to force fresh session on retry
@@ -434,15 +461,15 @@ export class ClaudeHandler {
         };
 
         const injectAllActions = shouldInjectActions(slackContext);
-        const actionDefinitions = this.customActionRegistry.getActionToolDefinitions(
-          actionSlackCtx,
-          injectAllActions
-            ? undefined
-            : action => action.alwaysInject === true,
-        );
-        const customActionServers = await buildClaudeActionMcpServers(
-          actionDefinitions,
-        );
+        const actionDefinitions =
+          this.customActionRegistry.getActionToolDefinitions(
+            actionSlackCtx,
+            injectAllActions
+              ? undefined
+              : action => action.alwaysInject === true,
+          );
+        const customActionServers =
+          await buildClaudeActionMcpServers(actionDefinitions);
         options.mcpServers = {
           ...(options.mcpServers || {}),
           ...customActionServers,
