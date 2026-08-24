@@ -94,6 +94,49 @@ describe("OpenAI stream event adapter", () => {
     ).toHaveLength(1);
   });
 
+  // A multi-turn run emits one response_done per response. Reporting only the
+  // last response's usage undercounts the run in tracking and cost reporting.
+  it("accumulates usage across responses", async () => {
+    const response = (id: string, input: number, output: number) => ({
+      type: "raw_model_stream_event",
+      data: {
+        type: "response_done",
+        response: {
+          id,
+          usage: { inputTokens: input, outputTokens: output },
+        },
+      },
+    });
+    const events = await collect(
+      adaptOpenAIStream(
+        (async function* () {
+          yield response("resp-1", 10, 4);
+          yield response("resp-2", 7, 3);
+        })(),
+        { result: { finalOutput: "done", currentTurn: 2 } },
+      ),
+    );
+
+    const usageEvents = events.filter(
+      event => (event as any).type === "usage",
+    ) as any[];
+    expect(usageEvents.map(event => event.usage)).toEqual([
+      { requests: 1, inputTokens: 10, outputTokens: 4, totalTokens: 14 },
+      { requests: 2, inputTokens: 17, outputTokens: 7, totalTokens: 24 },
+    ]);
+    expect(events[events.length - 1]).toEqual(
+      expect.objectContaining({
+        type: "terminal",
+        usage: {
+          requests: 2,
+          inputTokens: 17,
+          outputTokens: 7,
+          totalTokens: 24,
+        },
+      }),
+    );
+  });
+
   it("classifies aborts and max-turn failures as terminal outcomes", async () => {
     const controller = new AbortController();
     controller.abort();

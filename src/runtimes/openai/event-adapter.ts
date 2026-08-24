@@ -106,6 +106,22 @@ function usageFrom(value: any): AgentUsage | undefined {
   };
 }
 
+/**
+ * A multi-turn run emits one response_done per response. Sum them so the
+ * terminal event reports the whole run rather than only its last response.
+ * MessageProcessor replaces its stored usage on each usage event and again on
+ * the terminal event, so emitting the running total never double-counts.
+ */
+function addUsage(total: AgentUsage | undefined, next: AgentUsage): AgentUsage {
+  if (!total) return next;
+  return {
+    requests: (total.requests ?? 0) + (next.requests ?? 0),
+    inputTokens: (total.inputTokens ?? 0) + (next.inputTokens ?? 0),
+    outputTokens: (total.outputTokens ?? 0) + (next.outputTokens ?? 0),
+    totalTokens: (total.totalTokens ?? 0) + (next.totalTokens ?? 0),
+  };
+}
+
 function isMaxTurns(error: unknown): boolean {
   return (
     (error as any)?.name === "MaxTurnsExceededError" ||
@@ -188,8 +204,8 @@ export async function* adaptOpenAIStream(
         latestResponseId = raw.response?.id ?? latestResponseId;
         const usage = usageFrom(raw.response?.usage);
         if (usage) {
-          latestUsage = usage;
-          yield { type: "usage", usage };
+          latestUsage = addUsage(latestUsage, usage);
+          yield { type: "usage", usage: latestUsage };
         }
         if (options.sessionMode === "sdk_session" || latestResponseId) {
           yield {
