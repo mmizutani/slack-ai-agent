@@ -57,6 +57,26 @@ interface ChannelConfig {
   smartReply?: SmartReplyConfig;
 }
 
+/**
+ * Fill in the map-valued keys the rest of this class indexes directly.
+ *
+ * A YAML key whose entries are all commented out — which is exactly how
+ * config/example-channels.yaml ships `ephemeralChannelConfig` and
+ * `dmNotificationConfig` — parses to null, not {}. Callers then run
+ * `channelId in null` or `null[channelId]` and throw. Normalising once here
+ * keeps every call site honest, and matches how this loader already fails open
+ * when the configured file is missing.
+ */
+export function normalizeChannelConfig(parsed: unknown): ChannelConfig {
+  const config = (parsed ?? {}) as Partial<ChannelConfig>;
+  return {
+    ...config,
+    channelSettings: config.channelSettings ?? [],
+    ephemeralChannelConfig: config.ephemeralChannelConfig ?? {},
+    dmNotificationConfig: config.dmNotificationConfig ?? {},
+  };
+}
+
 export class ChannelConfigManager {
   private logger = new Logger("ChannelConfigManager");
   private configCache: Map<string, { data: any; fetchedAt: number }> =
@@ -133,7 +153,7 @@ export class ChannelConfigManager {
       );
     }
     const configContent = fs.readFileSync(configPath, "utf-8");
-    const loadedConfig = yaml.load(configContent) as ChannelConfig;
+    const loadedConfig = normalizeChannelConfig(yaml.load(configContent));
 
     this.configCache.set(cacheKey, { data: loadedConfig, fetchedAt: now });
     this.logger.debug("Loaded channel config from local file");

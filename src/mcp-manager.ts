@@ -260,11 +260,31 @@ export class McpManager {
       return this.allowlistCache.data;
     }
 
-    const allowlistContent = fs.readFileSync(
-      path.resolve("config/tool-allowlist.yaml"),
-      "utf-8",
-    );
-    const allowlist = yaml.load(allowlistContent) as ToolAllowlist;
+    const allowlistPath = path.resolve("config/tool-allowlist.yaml");
+
+    // Fail closed rather than throwing, and deliberately without the
+    // example-file fallback that channels.yaml and emojis.yaml use. Throwing
+    // here surfaced as three retries and a generic "something went wrong" in
+    // Slack, so the bot could not answer at all. Falling back to the example
+    // would be worse than either: an allowlist grants permissions, and
+    // adopting the template's grants because the operator has not written one
+    // hands out tools nobody chose.
+    if (!fs.existsSync(allowlistPath)) {
+      this.logger.warn("Tool allowlist is missing; granting no tools", {
+        path: allowlistPath,
+      });
+      // Cached only briefly, mirroring the denylist, so writing the file is
+      // picked up promptly instead of after the hour-long success TTL.
+      this.allowlistCache = {
+        data: {},
+        fetchedAt:
+          now - this.CACHE_TTL_MS + McpManager.MISSING_ALLOWLIST_CACHE_TTL_MS,
+      };
+      return {};
+    }
+
+    const allowlistContent = fs.readFileSync(allowlistPath, "utf-8");
+    const allowlist = (yaml.load(allowlistContent) ?? {}) as ToolAllowlist;
 
     this.allowlistCache = { data: allowlist, fetchedAt: now };
     this.logger.debug("Loaded tool allowlist from local file");
@@ -337,6 +357,9 @@ export class McpManager {
       this.getDisallowedTools(),
     );
   }
+
+  // Re-check for a missing allowlist every 30s so writing the file self-heals.
+  private static readonly MISSING_ALLOWLIST_CACHE_TTL_MS = 30 * 1000;
 
   // Retry loading denylist every 30s on error so fixes are picked up quickly
   private static readonly DENYLIST_ERROR_CACHE_TTL_MS = 30 * 1000;
