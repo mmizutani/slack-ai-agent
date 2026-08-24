@@ -1,4 +1,9 @@
-import { Agent, MemorySession, type Runner, type Session } from "@openai/agents";
+import {
+  Agent,
+  MemorySession,
+  type Runner,
+  type Session,
+} from "@openai/agents";
 import type { AgentRunRequest } from "../../agent/events";
 import type { AgentRuntime } from "../../agent/runtime";
 import type { ActionToolDefinition } from "../../custom-actions/tool-definitions";
@@ -24,7 +29,13 @@ export interface OpenAIRuntimeOptions extends OpenAIProviderConfig {
   subagentDefinitions?: readonly SubagentDefinition[];
   storeResponses?: boolean;
   maxSdkSessions?: number;
+  mcpConnectTimeoutMs?: number;
 }
+
+// MCPServer.connect() takes no abort signal, so the wait has to be bounded from
+// the outside. Without this, one unreachable MCP endpoint hangs the Slack turn
+// indefinitely.
+const DEFAULT_MCP_CONNECT_TIMEOUT_MS = 30_000;
 
 function isTransientPreRunFailure(error: unknown): boolean {
   const status = Number((error as any)?.status ?? (error as any)?.statusCode);
@@ -46,6 +57,7 @@ export class OpenAIAgentRuntime implements AgentRuntime {
   private readonly sdkSessions = new Map<string, Session>();
   private readonly storeResponses: boolean;
   private readonly maxSdkSessions: number;
+  private readonly mcpConnectTimeoutMs: number;
 
   constructor(options: OpenAIRuntimeOptions = {}) {
     this.providerClient =
@@ -58,18 +70,75 @@ export class OpenAIAgentRuntime implements AgentRuntime {
       });
     this.runner =
       options.runner ??
-      createOpenAIRunner(this.providerClient, options.tracingEnabled ?? config.openai.tracingEnabled);
+      createOpenAIRunner(
+        this.providerClient,
+        options.tracingEnabled ?? config.openai.tracingEnabled,
+      );
     this.sessionMode = options.sessionMode ?? config.openai.sessionMode;
     this.agentName = options.agentName ?? "slack-ai-agent";
     this.subagentDefinitions = options.subagentDefinitions ?? [];
     this.storeResponses =
       options.storeResponses ?? config.openai.storeResponses;
     this.maxSdkSessions = Math.max(1, options.maxSdkSessions ?? 1_000);
+    this.mcpConnectTimeoutMs =
+      options.mcpConnectTimeoutMs ?? DEFAULT_MCP_CONNECT_TIMEOUT_MS;
+  }
+
+  /**
+   * Connect every MCP server, bounded by the request signal and a timeout.
+   * MCPServer.connect() accepts neither, so the bound is applied by racing the
+   * combined connect against both.
+   */
+  private async connectMcpServers(
+    servers: readonly any[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (servers.length === 0) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onAbort: (() => void) | undefined;
+    try {
+      await Promise.race([
+        Promise.all(
+          servers.map(server =>
+            typeof server.connect === "function" ? server.connect() : undefined,
+          ),
+        ),
+        new Promise<never>((_resolve, reject) => {
+          timer = setTimeout(
+            () => reject(new Error("MCP server connect timed out")),
+            this.mcpConnectTimeoutMs,
+          );
+          onAbort = () => reject(new Error("aborted"));
+          if (signal.aborted) onAbort();
+          else signal.addEventListener("abort", onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (timer) clearTimeout(timer);
+      if (onAbort) signal.removeEventListener("abort", onAbort);
+    }
+  }
+
+  /** Release every request-scoped MCP server, whichever set it came from. */
+  private async closeMcpServers(
+    mcpBundle: { close(): Promise<void> },
+    configuredMcpServers: readonly any[],
+  ): Promise<void> {
+    await mcpBundle.close();
+    await Promise.allSettled(
+      configuredMcpServers.map(server =>
+        typeof server.close === "function" ? server.close() : undefined,
+      ),
+    );
   }
 
   async *stream(request: AgentRunRequest) {
     if (request.signal.aborted) {
-      yield { type: "terminal", outcome: "cancelled", reason: "aborted" } as const;
+      yield {
+        type: "terminal",
+        outcome: "cancelled",
+        reason: "aborted",
+      } as const;
       return;
     }
 
@@ -80,18 +149,15 @@ export class OpenAIAgentRuntime implements AgentRuntime {
     const mcpDefinitions = Array.isArray(request.tools.mcpDefinitions)
       ? (request.tools.mcpDefinitions as ResolvedMcpServerDefinition[])
       : [];
-    const configuredPermissionPolicy =
-      (request.tools.permissionPolicy ?? request.permissions) as
+    const configuredPermissionPolicy = (request.tools.permissionPolicy ??
+      request.permissions) as
       | { allowed?: string[]; denied?: string[] }
       | undefined;
     const permissionPolicy = (configuredPermissionPolicy ?? {
       allowed: [],
       denied: [],
     }) as { allowed: string[]; denied: string[] };
-    const mcpBundle = buildOpenAIMcpServers(
-      mcpDefinitions,
-      permissionPolicy,
-    );
+    const mcpBundle = buildOpenAIMcpServers(mcpDefinitions, permissionPolicy);
     let configuredMcpServers: any[] = [];
     let agent: any;
     try {
@@ -109,7 +175,9 @@ export class OpenAIAgentRuntime implements AgentRuntime {
         actionDefinitions,
         permissionPolicy,
       );
-      const subagentDefinitions = Array.isArray(request.tools.subagentDefinitions)
+      const subagentDefinitions = Array.isArray(
+        request.tools.subagentDefinitions,
+      )
         ? (request.tools.subagentDefinitions as SubagentDefinition[])
         : this.subagentDefinitions;
       const subagentTools = buildOpenAISubagentTools(
@@ -129,9 +197,7 @@ export class OpenAIAgentRuntime implements AgentRuntime {
         model,
         modelSettings: {
           store: this.storeResponses,
-          ...(request.effort
-            ? { reasoning: { effort: request.effort } }
-            : {}),
+          ...(request.effort ? { reasoning: { effort: request.effort } } : {}),
         },
         tools: [...providerTools, ...actionTools, ...subagentTools],
         mcpServers: [...mcpBundle.servers, ...configuredMcpServers],
@@ -174,13 +240,22 @@ export class OpenAIAgentRuntime implements AgentRuntime {
     }
 
     try {
-      await Promise.all(
-        [...mcpBundle.servers, ...configuredMcpServers].map(server =>
-          typeof server.connect === "function" ? server.connect() : undefined,
-        ),
+      await this.connectMcpServers(
+        [...mcpBundle.servers, ...configuredMcpServers],
+        request.signal,
       );
     } catch (error) {
-      await mcpBundle.close();
+      // Both server sets must be released here: this path returns before the
+      // finally block below, so anything that did connect would otherwise leak.
+      await this.closeMcpServers(mcpBundle, configuredMcpServers);
+      if (request.signal.aborted) {
+        yield {
+          type: "terminal",
+          outcome: "cancelled",
+          reason: "aborted",
+        } as const;
+        return;
+      }
       yield {
         type: "terminal",
         outcome: "failed",
@@ -221,12 +296,22 @@ export class OpenAIAgentRuntime implements AgentRuntime {
             continue;
           }
           if (request.signal.aborted || (error as any)?.name === "AbortError") {
-            yield { type: "terminal", outcome: "cancelled", reason: "aborted" } as const;
+            yield {
+              type: "terminal",
+              outcome: "cancelled",
+              reason: "aborted",
+            } as const;
           } else if (
             (error as any)?.name === "MaxTurnsExceededError" ||
-            /max.?turns/i.test(error instanceof Error ? error.message : String(error))
+            /max.?turns/i.test(
+              error instanceof Error ? error.message : String(error),
+            )
           ) {
-            yield { type: "terminal", outcome: "limit", reason: "max_turns" } as const;
+            yield {
+              type: "terminal",
+              outcome: "limit",
+              reason: "max_turns",
+            } as const;
           } else {
             yield {
               type: "terminal",
@@ -238,12 +323,7 @@ export class OpenAIAgentRuntime implements AgentRuntime {
         }
       }
     } finally {
-      await mcpBundle.close();
-      await Promise.allSettled(
-        configuredMcpServers.map(server =>
-          typeof server.close === "function" ? server.close() : undefined,
-        ),
-      );
+      await this.closeMcpServers(mcpBundle, configuredMcpServers);
     }
   }
 

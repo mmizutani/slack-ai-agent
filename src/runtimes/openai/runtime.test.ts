@@ -29,25 +29,33 @@ describe("OpenAIAgentRuntime", () => {
       lastActivity: new Date(),
     };
 
-    await collect(runtime.stream({
-      prompt: "create it",
-      session,
-      model: { provider: "openai", model: "gpt-5.6-luna" },
-      signal: new AbortController().signal,
-      maxTurns: 1,
-      permissions: {},
-      tools: {
-        actionDefinitions: [{
-          identity: { kind: "action", server: "custom-actions", name: "create-ticket" },
-          name: "create-ticket",
-          description: "Create a ticket",
-          inputSchema: { type: "object", properties: {} },
-          requiresApproval: true,
-          invoke: jest.fn(),
-        }],
-      },
-      metadata: { requestId: "policy-1", sessionKey: "policy-thread" },
-    }));
+    await collect(
+      runtime.stream({
+        prompt: "create it",
+        session,
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+        signal: new AbortController().signal,
+        maxTurns: 1,
+        permissions: {},
+        tools: {
+          actionDefinitions: [
+            {
+              identity: {
+                kind: "action",
+                server: "custom-actions",
+                name: "create-ticket",
+              },
+              name: "create-ticket",
+              description: "Create a ticket",
+              inputSchema: { type: "object", properties: {} },
+              requiresApproval: true,
+              invoke: jest.fn(),
+            },
+          ],
+        },
+        metadata: { requestId: "policy-1", sessionKey: "policy-thread" },
+      }),
+    );
 
     expect(run.mock.calls[0][0].tools).toEqual([]);
   });
@@ -72,16 +80,18 @@ describe("OpenAIAgentRuntime", () => {
       lastActivity: new Date(),
     };
 
-    await collect(runtime.stream({
-      prompt: "private",
-      session,
-      model: { provider: "openai", model: "gpt-5.6-luna" },
-      signal: new AbortController().signal,
-      maxTurns: 1,
-      permissions: {},
-      tools: {},
-      metadata: { requestId: "store-1", sessionKey: "store-thread" },
-    }));
+    await collect(
+      runtime.stream({
+        prompt: "private",
+        session,
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+        signal: new AbortController().signal,
+        maxTurns: 1,
+        permissions: {},
+        tools: {},
+        metadata: { requestId: "store-1", sessionKey: "store-thread" },
+      }),
+    );
 
     expect(run.mock.calls[0][0].modelSettings).toEqual(
       expect.objectContaining({ store: false }),
@@ -90,21 +100,22 @@ describe("OpenAIAgentRuntime", () => {
 
   it("binds an SDK session in sdk_session mode and reuses it for the thread", async () => {
     const makeStream = () =>
-      Object.assign((async function* () {
-        yield {
-          type: "raw_model_stream_event",
-          data: {
-            type: "response_done",
-            response: { id: "response-sdk" },
-          },
-        };
-      })(), {
-        finalOutput: "ok",
-        currentTurn: 1,
-      });
-    const run = jest
-      .fn()
-      .mockImplementation(async () => makeStream());
+      Object.assign(
+        (async function* () {
+          yield {
+            type: "raw_model_stream_event",
+            data: {
+              type: "response_done",
+              response: { id: "response-sdk" },
+            },
+          };
+        })(),
+        {
+          finalOutput: "ok",
+          currentTurn: 1,
+        },
+      );
+    const run = jest.fn().mockImplementation(async () => makeStream());
     const runtime = new OpenAIAgentRuntime({
       apiKey: "test-key",
       runner: { run } as any,
@@ -129,7 +140,12 @@ describe("OpenAIAgentRuntime", () => {
     };
 
     await collect(runtime.stream(request));
-    await collect(runtime.stream({ ...request, metadata: { ...request.metadata, requestId: "sdk-2" } }));
+    await collect(
+      runtime.stream({
+        ...request,
+        metadata: { ...request.metadata, requestId: "sdk-2" },
+      }),
+    );
 
     const firstSession = run.mock.calls[0][2].session;
     expect(firstSession).toBeDefined();
@@ -138,10 +154,11 @@ describe("OpenAIAgentRuntime", () => {
   });
 
   it("evicts and clears the least-recent SDK session at the configured bound", async () => {
-    const makeStream = () => Object.assign((async function* () {})(), {
-      finalOutput: "ok",
-      currentTurn: 1,
-    });
+    const makeStream = () =>
+      Object.assign((async function* () {})(), {
+        finalOutput: "ok",
+        currentTurn: 1,
+      });
     const run = jest.fn().mockImplementation(async () => makeStream());
     const runtime = new OpenAIAgentRuntime({
       apiKey: "test-key",
@@ -191,40 +208,52 @@ describe("OpenAIAgentRuntime", () => {
       lastActivity: new Date(),
     };
 
-    const events = await collect(runtime.stream({
-      prompt: "run",
-      session,
-      model: { provider: "openai", model: "gpt-5.6-luna" },
-      signal: new AbortController().signal,
-      maxTurns: 1,
-      permissions: {},
-      tools: {
-        mcpDefinitions: [{
-          name: "remote",
-          transport: "streamable_http",
-          url: "https://mcp.example",
-        }],
-        actionDefinitions: [{
-          identity: { kind: "action", server: "custom-actions", name: "broken" },
-          name: "broken",
-          description: "Broken schema",
-          inputSchema: null as any,
-          requiresApproval: false,
-          invoke: jest.fn(),
-        }],
-        permissionPolicy: {
-          allowed: ["action:custom-actions/broken"],
-          denied: [],
+    const events = await collect(
+      runtime.stream({
+        prompt: "run",
+        session,
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+        signal: new AbortController().signal,
+        maxTurns: 1,
+        permissions: {},
+        tools: {
+          mcpDefinitions: [
+            {
+              name: "remote",
+              transport: "streamable_http",
+              url: "https://mcp.example",
+            },
+          ],
+          actionDefinitions: [
+            {
+              identity: {
+                kind: "action",
+                server: "custom-actions",
+                name: "broken",
+              },
+              name: "broken",
+              description: "Broken schema",
+              inputSchema: null as any,
+              requiresApproval: false,
+              invoke: jest.fn(),
+            },
+          ],
+          permissionPolicy: {
+            allowed: ["action:custom-actions/broken"],
+            denied: [],
+          },
         },
-      },
-      metadata: { requestId: "cleanup", sessionKey: "cleanup" },
-    }));
+        metadata: { requestId: "cleanup", sessionKey: "cleanup" },
+      }),
+    );
 
     expect(close).toHaveBeenCalledTimes(1);
-    expect(events).toContainEqual(expect.objectContaining({
-      type: "terminal",
-      outcome: "failed",
-    }));
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "terminal",
+        outcome: "failed",
+      }),
+    );
     close.mockRestore();
   });
 
@@ -309,20 +338,37 @@ describe("OpenAIAgentRuntime", () => {
       })(),
       { finalOutput: "ok", currentTurn: 1 },
     );
-    const transient = Object.assign(new Error("upstream unavailable"), { status: 503 });
-    const run = jest.fn().mockRejectedValueOnce(transient).mockResolvedValueOnce(stream);
-    const runtime = new OpenAIAgentRuntime({ runner: { run } as any, apiKey: "test-key" });
+    const transient = Object.assign(new Error("upstream unavailable"), {
+      status: 503,
+    });
+    const run = jest
+      .fn()
+      .mockRejectedValueOnce(transient)
+      .mockResolvedValueOnce(stream);
+    const runtime = new OpenAIAgentRuntime({
+      runner: { run } as any,
+      apiKey: "test-key",
+    });
     const session: ConversationSession = {
-      userId: "U1", channelId: "C1", workingDirectory: "/tmp/work",
-      providerState: {}, lastActivity: new Date(),
+      userId: "U1",
+      channelId: "C1",
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(),
     };
 
-    const events = await collect(runtime.stream({
-      prompt: "retry", session,
-      model: { provider: "openai", model: "gpt-5.6-luna" },
-      signal: new AbortController().signal, maxTurns: 4,
-      permissions: {}, tools: {}, metadata: { requestId: "r2", sessionKey: "s2" },
-    }));
+    const events = await collect(
+      runtime.stream({
+        prompt: "retry",
+        session,
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+        signal: new AbortController().signal,
+        maxTurns: 4,
+        permissions: {},
+        tools: {},
+        metadata: { requestId: "r2", sessionKey: "s2" },
+      }),
+    );
 
     expect(run).toHaveBeenCalledTimes(2);
     expect(events).toContainEqual({ type: "text_delta", text: "ok" });
@@ -333,40 +379,65 @@ describe("OpenAIAgentRuntime", () => {
       yield {
         type: "run_item_stream_event",
         name: "tool_called",
-        item: { rawItem: {
-          type: "function_call", callId: "call-1", name: "create_ticket", arguments: "{}",
-        } },
+        item: {
+          rawItem: {
+            type: "function_call",
+            callId: "call-1",
+            name: "create_ticket",
+            arguments: "{}",
+          },
+        },
       };
       throw new Error("connection lost after tool call");
     })();
     const run = jest.fn().mockResolvedValue(stream);
-    const runtime = new OpenAIAgentRuntime({ runner: { run } as any, apiKey: "test-key" });
+    const runtime = new OpenAIAgentRuntime({
+      runner: { run } as any,
+      apiKey: "test-key",
+    });
     const session: ConversationSession = {
-      userId: "U1", channelId: "C1", workingDirectory: "/tmp/work",
-      providerState: {}, lastActivity: new Date(),
+      userId: "U1",
+      channelId: "C1",
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(),
     };
 
-    const events = await collect(runtime.stream({
-      prompt: "do it", session,
-      model: { provider: "openai", model: "gpt-5.6-luna" },
-      signal: new AbortController().signal, maxTurns: 4,
-      permissions: {}, tools: {}, metadata: { requestId: "r3", sessionKey: "s3" },
-    }));
+    const events = await collect(
+      runtime.stream({
+        prompt: "do it",
+        session,
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+        signal: new AbortController().signal,
+        maxTurns: 4,
+        permissions: {},
+        tools: {},
+        metadata: { requestId: "r3", sessionKey: "s3" },
+      }),
+    );
 
     expect(run).toHaveBeenCalledTimes(1);
-    expect(events).toContainEqual(expect.objectContaining({ type: "terminal", outcome: "failed" }));
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "terminal", outcome: "failed" }),
+    );
   });
 
   it("exposes only explicitly authorized workspace tools and lets deny win", async () => {
-    const stream = Object.assign(
-      (async function* () {})(),
-      { finalOutput: "ok", currentTurn: 1 },
-    );
+    const stream = Object.assign((async function* () {})(), {
+      finalOutput: "ok",
+      currentTurn: 1,
+    });
     const run = jest.fn().mockResolvedValue(stream);
-    const runtime = new OpenAIAgentRuntime({ runner: { run } as any, apiKey: "test-key" });
+    const runtime = new OpenAIAgentRuntime({
+      runner: { run } as any,
+      apiKey: "test-key",
+    });
     const session: ConversationSession = {
-      userId: "U1", channelId: "C1", workingDirectory: "/tmp/work",
-      providerState: {}, lastActivity: new Date(),
+      userId: "U1",
+      channelId: "C1",
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(),
     };
     const tools = buildWorkspaceTools("/tmp/work");
     const request = {
@@ -395,12 +466,21 @@ describe("OpenAIAgentRuntime", () => {
   });
 
   it("adds manager-style subagents with the parent tool policy", async () => {
-    const stream = Object.assign((async function* () {})(), { finalOutput: "ok", currentTurn: 1 });
+    const stream = Object.assign((async function* () {})(), {
+      finalOutput: "ok",
+      currentTurn: 1,
+    });
     const run = jest.fn().mockResolvedValue(stream);
-    const runtime = new OpenAIAgentRuntime({ runner: { run } as any, apiKey: "test-key" });
+    const runtime = new OpenAIAgentRuntime({
+      runner: { run } as any,
+      apiKey: "test-key",
+    });
     const session: ConversationSession = {
-      userId: "U1", channelId: "C1", workingDirectory: "/tmp/work",
-      providerState: {}, lastActivity: new Date(),
+      userId: "U1",
+      channelId: "C1",
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(),
     };
     const definition: SubagentDefinition = {
       name: "validator",
@@ -410,21 +490,139 @@ describe("OpenAIAgentRuntime", () => {
       tools: ["workspace/read_file"],
     };
 
-    await collect(runtime.stream({
-      prompt: "delegate", session,
-      model: { provider: "openai", model: "gpt-5.6-luna" },
-      signal: new AbortController().signal, maxTurns: 4,
-      permissions: {},
-      tools: {
-        workspaceTools: buildWorkspaceTools("/tmp/work"),
-        subagentDefinitions: [definition],
-        permissionPolicy: { allowed: ["workspace/read_file"], denied: [] },
-      },
-      metadata: { requestId: "r5", sessionKey: "s5" },
-    }));
+    await collect(
+      runtime.stream({
+        prompt: "delegate",
+        session,
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+        signal: new AbortController().signal,
+        maxTurns: 4,
+        permissions: {},
+        tools: {
+          workspaceTools: buildWorkspaceTools("/tmp/work"),
+          subagentDefinitions: [definition],
+          permissionPolicy: { allowed: ["workspace/read_file"], denied: [] },
+        },
+        metadata: { requestId: "r5", sessionKey: "s5" },
+      }),
+    );
 
     expect(run.mock.calls[0][0].tools.map((tool: any) => tool.name)).toContain(
       "subagent__validator",
     );
+  });
+
+  describe("MCP connect", () => {
+    const session = (): ConversationSession => ({
+      userId: "U1",
+      channelId: "C1",
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(),
+    });
+
+    const fakeServer = (connect: () => Promise<void>) => ({
+      name: "configured",
+      connect: jest.fn(connect),
+      close: jest.fn().mockResolvedValue(undefined),
+    });
+
+    it("closes already-connected servers when another connect rejects", async () => {
+      const run = jest.fn();
+      const runtime = new OpenAIAgentRuntime({
+        apiKey: "test-key",
+        runner: { run } as any,
+      });
+      const connected = fakeServer(async () => undefined);
+      const failing = fakeServer(async () => {
+        throw new Error("connect refused");
+      });
+
+      const events = await collect(
+        runtime.stream({
+          prompt: "hi",
+          session: session(),
+          model: { provider: "openai", model: "gpt-5.6-luna" },
+          signal: new AbortController().signal,
+          maxTurns: 1,
+          permissions: {},
+          tools: { mcpServers: [connected, failing] },
+          metadata: { requestId: "mcp-1", sessionKey: "mcp-thread-1" },
+        }),
+      );
+
+      expect(events).toContainEqual(
+        expect.objectContaining({ type: "terminal", outcome: "failed" }),
+      );
+      // The failure path returned before the finally block, so a server that
+      // did connect stayed open for the lifetime of the process.
+      expect(connected.close).toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it("gives up on a stalled connect instead of hanging the request", async () => {
+      const run = jest.fn();
+      const runtime = new OpenAIAgentRuntime({
+        apiKey: "test-key",
+        runner: { run } as any,
+        mcpConnectTimeoutMs: 10,
+      });
+      const stalled = fakeServer(() => new Promise<void>(() => undefined));
+
+      const events = await collect(
+        runtime.stream({
+          prompt: "hi",
+          session: session(),
+          model: { provider: "openai", model: "gpt-5.6-luna" },
+          signal: new AbortController().signal,
+          maxTurns: 1,
+          permissions: {},
+          tools: { mcpServers: [stalled] },
+          metadata: { requestId: "mcp-2", sessionKey: "mcp-thread-2" },
+        }),
+      );
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "terminal",
+          outcome: "failed",
+          reason: expect.stringMatching(/timed out/i),
+        }),
+      );
+      expect(stalled.close).toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it("stops waiting on connect when the request is aborted", async () => {
+      const run = jest.fn();
+      const runtime = new OpenAIAgentRuntime({
+        apiKey: "test-key",
+        runner: { run } as any,
+      });
+      const controller = new AbortController();
+      const stalled = fakeServer(() => new Promise<void>(() => undefined));
+      setTimeout(() => controller.abort(), 10);
+
+      const events = await collect(
+        runtime.stream({
+          prompt: "hi",
+          session: session(),
+          model: { provider: "openai", model: "gpt-5.6-luna" },
+          signal: controller.signal,
+          maxTurns: 1,
+          permissions: {},
+          tools: { mcpServers: [stalled] },
+          metadata: { requestId: "mcp-3", sessionKey: "mcp-thread-3" },
+        }),
+      );
+
+      expect(events).toContainEqual({
+        type: "terminal",
+        outcome: "cancelled",
+        reason: "aborted",
+      });
+      expect(stalled.close).toHaveBeenCalled();
+      expect(run).not.toHaveBeenCalled();
+    });
   });
 });
