@@ -6,6 +6,9 @@ import { resolveOpenAIModel } from "../src/runtimes/openai/model-config";
 dotenv.config({ quiet: true });
 
 const MODEL = resolveOpenAIModel();
+// Mirror the runtime rule in src/config.ts. Deployments that opt out of
+// Responses storage must not have the smoke check silently store transcripts.
+const STORE_RESPONSES = process.env.OPENAI_STORE_RESPONSES !== "false";
 
 async function main(): Promise<void> {
   const apiKey = process.env.OPENAI_API_KEY;
@@ -17,7 +20,9 @@ async function main(): Promise<void> {
 
   const provider = new OpenAIProvider({
     apiKey,
-    ...(process.env.OPENAI_BASE_URL && { baseURL: process.env.OPENAI_BASE_URL }),
+    ...(process.env.OPENAI_BASE_URL && {
+      baseURL: process.env.OPENAI_BASE_URL,
+    }),
     ...(process.env.OPENAI_ORGANIZATION && {
       organization: process.env.OPENAI_ORGANIZATION,
     }),
@@ -36,12 +41,16 @@ async function main(): Promise<void> {
         name: "openai-smoke-text",
         instructions: "Reply with a short confirmation.",
         model: MODEL,
+        modelSettings: { store: STORE_RESPONSES },
         tools: [],
       }),
       "Return a short smoke-test confirmation.",
       { maxTurns: 1 },
     );
-    if (typeof textResult.finalOutput !== "string" || !textResult.finalOutput.trim()) {
+    if (
+      typeof textResult.finalOutput !== "string" ||
+      !textResult.finalOutput.trim()
+    ) {
       throw new Error("text response was empty");
     }
 
@@ -51,6 +60,11 @@ async function main(): Promise<void> {
       description: "Add two integers for the deterministic smoke check.",
       parameters: z.object({ a: z.number(), b: z.number() }),
       execute: async ({ a, b }) => {
+        // Assert the arguments too: invocation alone would pass even if the
+        // model called the tool with the wrong operands.
+        if (a !== 2 || b !== 3) {
+          throw new Error("smoke_add received unexpected arguments");
+        }
         invoked = true;
         return String(a + b);
       },
@@ -61,7 +75,7 @@ async function main(): Promise<void> {
         instructions:
           "Call smoke_add with a=2 and b=3, then reply with exactly TOOL_OK.",
         model: MODEL,
-        modelSettings: { toolChoice: "required" },
+        modelSettings: { toolChoice: "required", store: STORE_RESPONSES },
         tools: [add],
       }),
       "Run the deterministic function-tool check.",
@@ -71,7 +85,9 @@ async function main(): Promise<void> {
       throw new Error("deterministic function-tool check did not complete");
     }
 
-    console.log("OpenAI smoke passed: text and deterministic function-tool modes");
+    console.log(
+      "OpenAI smoke passed: text and deterministic function-tool modes",
+    );
   } catch (error) {
     // Do not print provider messages: gateways may include request details.
     console.error(
