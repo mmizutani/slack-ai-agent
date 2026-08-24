@@ -31,10 +31,7 @@ function subagentToolName(name: string): string {
   return `subagent__${name.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
 }
 
-function modelFor(
-  definition: SubagentDefinition,
-  parentModel: string,
-): string {
+function modelFor(definition: SubagentDefinition, parentModel: string): string {
   return definition.model?.provider === "openai"
     ? definition.model.model
     : parentModel;
@@ -46,7 +43,8 @@ export function buildOpenAISubagentTools(
   parentPolicy: OpenAISubagentPolicy,
   options: OpenAISubagentAdapterOptions = {},
 ): Tool[] {
-  const createAgent = options.createAgent ?? (config => new Agent(config as any));
+  const createAgent =
+    options.createAgent ?? (config => new Agent(config as any));
   const parentModel = options.parentModel ?? "gpt-5.6-luna";
   const availableTools = options.availableTools ?? [];
   return definitions.map(definition => {
@@ -54,6 +52,7 @@ export function buildOpenAISubagentTools(
       parentPolicy.allowed,
       definition.tools,
       parentPolicy.denied ?? [],
+      "openai",
     );
     const permitted = new Set(requested.flatMap(legacyToolIdentities));
     const childTools = availableTools.filter(tool =>
@@ -72,7 +71,7 @@ export function buildOpenAISubagentTools(
       needsApproval: false,
       ...(options.modelProvider !== undefined
         ? {
-        runConfig: { modelProvider: options.modelProvider },
+            runConfig: { modelProvider: options.modelProvider },
           }
         : {}),
       ...(definition.maxTurns && {

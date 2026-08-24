@@ -2,6 +2,7 @@ import fs from "fs";
 import path from "path";
 import * as yaml from "js-yaml";
 import { parseModelRef } from "../agent/model";
+import type { AgentProviderId } from "../types";
 import { legacyToolIdentities } from "../mcp/permissions";
 import type { SubagentDefinition } from "./types";
 
@@ -29,7 +30,9 @@ function parseModel(value: unknown): SubagentDefinition["model"] {
 
 function parseTools(value: unknown): string[] | undefined {
   if (!Array.isArray(value)) return [];
-  const tools = value.filter((tool): tool is string => typeof tool === "string");
+  const tools = value.filter(
+    (tool): tool is string => typeof tool === "string",
+  );
   return tools.length > 0 ? tools : [];
 }
 
@@ -56,7 +59,9 @@ function parseDefinition(value: unknown): SubagentDefinition | undefined {
     model: parseModel(raw.model),
     instructions,
     ...(raw.tools !== undefined && { tools: parseTools(raw.tools) }),
-    ...(raw.maxTurns !== undefined && { maxTurns: parseMaxTurns(raw.maxTurns) }),
+    ...(raw.maxTurns !== undefined && {
+      maxTurns: parseMaxTurns(raw.maxTurns),
+    }),
   };
 }
 
@@ -97,14 +102,41 @@ export function loadSubagentDefinitions(
 }
 
 /**
+ * Narrow a name's identities to the ones the given runtime can actually serve.
+ *
+ * "Read", "Grep" and "Glob" each map to two identities — the Claude native tool
+ * and the OpenAI workspace alias — but computeEffectiveToolPolicy grants only
+ * the native one unless the workspace alias is configured explicitly. Without
+ * this narrowing, a parent policy allowing `provider_native:anthropic/Read`
+ * would let a subagent asking for "Read" be handed `workspace_read_file` on the
+ * OpenAI runtime, and vice versa.
+ */
+function identitiesForProvider(
+  identities: readonly string[],
+  provider?: AgentProviderId,
+): string[] {
+  if (!provider) return [...identities];
+  return identities.filter(identity =>
+    provider === "anthropic"
+      ? !identity.startsWith("workspace/")
+      : !identity.startsWith("provider_native:anthropic/"),
+  );
+}
+
+/**
  * Restrict a subagent request to the parent's effective legacy tool policy.
  * Matching is performed on canonical identities, while the returned names
  * remain in the form requested by the provider adapter.
+ *
+ * The allow check runs against the identities the runtime can serve; the deny
+ * check runs against every identity the name maps to, so denying either half of
+ * a legacy alias rejects the name outright.
  */
 export function intersectSubagentTools(
   parentAllowedTools: readonly string[],
   requestedTools?: readonly string[],
   parentDeniedTools: readonly string[] = [],
+  provider?: AgentProviderId,
 ): string[] {
   const parentAllowed = new Set(
     parentAllowedTools.flatMap(legacyToolIdentities),
@@ -113,9 +145,10 @@ export function intersectSubagentTools(
   const candidates = requestedTools ?? parentAllowedTools;
   return candidates.filter(tool => {
     const identities = legacyToolIdentities(tool);
+    const grantable = identitiesForProvider(identities, provider);
     return (
-      identities.length > 0 &&
-      identities.some(identity => parentAllowed.has(identity)) &&
+      grantable.length > 0 &&
+      grantable.some(identity => parentAllowed.has(identity)) &&
       identities.every(identity => !parentDenied.has(identity))
     );
   });

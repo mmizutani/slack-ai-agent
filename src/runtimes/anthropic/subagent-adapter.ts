@@ -36,6 +36,7 @@ export function toClaudeSubagentDefinitions(
         parentAllowedTools,
         definition.tools,
         parentDeniedTools,
+        "anthropic",
       );
       return [
         definition.name,
