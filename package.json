@@ -13,7 +13,9 @@
     "build": "tsc",
     "prod": "node dist/src/index.js",
     "test": "jest",
-    "smoke:openai": "tsx scripts/openai-smoke.ts"
+    "smoke:openai": "tsx scripts/openai-smoke.ts",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "e2e:live": "tsx e2e/run.ts"
   },
   "keywords": [],
   "author": "",

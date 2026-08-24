@@ -2,7 +2,11 @@
 module.exports = {
   preset: "ts-jest",
   testEnvironment: "node",
-  roots: ["<rootDir>/src", "<rootDir>/config"],
+  // e2e/ holds the live-Slack harness. Only its *.test.ts files match
+  // testMatch, so the pure harness logic is covered by normal CI while the
+  // live cycle modules (plain .ts) are never run by Jest — the offline
+  // guard would block them anyway.
+  roots: ["<rootDir>/src", "<rootDir>/config", "<rootDir>/e2e"],
   testMatch: ["**/*.test.ts"],
   moduleFileExtensions: ["ts", "js", "json"],
   setupFiles: ["<rootDir>/src/test-setup.ts"],
