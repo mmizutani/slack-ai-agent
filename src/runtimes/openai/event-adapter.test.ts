@@ -89,7 +89,9 @@ describe("OpenAI stream event adapter", () => {
       turnCount: 2,
       usage: { inputTokens: 3, outputTokens: 2, totalTokens: 5, requests: 1 },
     });
-    expect(events.filter(event => (event as any).type === "terminal")).toHaveLength(1);
+    expect(
+      events.filter(event => (event as any).type === "terminal"),
+    ).toHaveLength(1);
   });
 
   it("classifies aborts and max-turn failures as terminal outcomes", async () => {
@@ -126,7 +128,11 @@ describe("OpenAI stream event adapter", () => {
 
     expect(events).toContainEqual({
       type: "session_update",
-      state: { provider: "openai", mode: "sdk_session", sessionKey: "thread-1" },
+      state: {
+        provider: "openai",
+        mode: "sdk_session",
+        sessionKey: "thread-1",
+      },
     });
   });
 
@@ -135,12 +141,14 @@ describe("OpenAI stream event adapter", () => {
       yield {
         type: "run_item_stream_event",
         name: "tool_called",
-        item: { rawItem: {
-          type: "function_call",
-          callId: "call-1",
-          name: "mcp__release_ops__get_status",
-          arguments: "{}",
-        } },
+        item: {
+          rawItem: {
+            type: "function_call",
+            callId: "call-1",
+            name: "mcp__release_ops__get_status",
+            arguments: "{}",
+          },
+        },
       };
     })();
 
@@ -160,20 +168,28 @@ describe("OpenAI stream event adapter", () => {
       yield {
         type: "run_item_stream_event",
         name: "tool_called",
-        item: { rawItem: {
-          type: "function_call",
-          callId: "call-2",
-          name: "action__custom_actions__create_ticket",
-          arguments: "{}",
-        } },
+        item: {
+          rawItem: {
+            type: "function_call",
+            callId: "call-2",
+            name: "action__custom_actions__create_ticket",
+            arguments: "{}",
+          },
+        },
       };
     })();
 
     const events = await collect(adaptOpenAIStream(source));
-    expect(events).toContainEqual(expect.objectContaining({
-      type: "tool_call",
-      tool: { kind: "action", server: "custom_actions", name: "create_ticket" },
-    }));
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "tool_call",
+        tool: {
+          kind: "action",
+          server: "custom_actions",
+          name: "create_ticket",
+        },
+      }),
+    );
   });
 
   it("bounds the wait for SDK stream settlement", async () => {
@@ -190,5 +206,46 @@ describe("OpenAI stream event adapter", () => {
       outcome: "failed",
       reason: "OpenAI stream settlement timed out",
     });
+  });
+
+  // `completed` is the SDK run promise. Both the settlement timeout and a throw
+  // from the stream loop leave the generator without ever awaiting it, and Node
+  // terminates the process on an unhandled rejection.
+  it.each([
+    {
+      label: "the settlement wait times out",
+      stream: (async function* () {})(),
+    },
+    {
+      label: "the stream loop throws",
+      stream: (async function* () {
+        throw new Error("stream failed");
+      })(),
+    },
+  ])("handles the run promise rejection when $label", async ({ stream }) => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      let failRun: (error: Error) => void = () => undefined;
+      const completed = new Promise<void>((_resolve, reject) => {
+        failRun = reject;
+      });
+
+      await collect(
+        adaptOpenAIStream(stream, {
+          result: { completed },
+          settlementTimeoutMs: 1,
+        }),
+      );
+
+      failRun(new Error("run rejected after the generator returned"));
+      await new Promise(resolve => setImmediate(resolve));
+      await new Promise(resolve => setImmediate(resolve));
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+
+    expect(unhandled).toEqual([]);
   });
 });

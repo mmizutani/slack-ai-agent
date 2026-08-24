@@ -156,6 +156,11 @@ export async function* adaptOpenAIStream(
   let latestResponseId: string | undefined;
   let latestUsage: AgentUsage | undefined;
   const result = options.result;
+  // `completed` is the SDK run promise and rejects when the run fails. When the
+  // stream loop throws, the generator returns without ever awaiting it, and Node
+  // terminates the process on an unhandled rejection. Subscribe up front; the
+  // settlement wait below still observes the same promise for its own outcome.
+  void result?.completed?.catch(() => undefined);
 
   const emitTerminal = (
     event: Extract<AgentEvent, { type: "terminal" }>,
@@ -194,7 +199,9 @@ export async function* adaptOpenAIStream(
                 ? {
                     provider: "openai",
                     mode: "sdk_session",
-                    ...(options.sessionKey && { sessionKey: options.sessionKey }),
+                    ...(options.sessionKey && {
+                      sessionKey: options.sessionKey,
+                    }),
                   }
                 : {
                     provider: "openai",
@@ -208,7 +215,10 @@ export async function* adaptOpenAIStream(
 
       if (sdkEvent?.type !== "run_item_stream_event") continue;
       const rawItem = sdkEvent.item?.rawItem ?? sdkEvent.item;
-      if (sdkEvent.name === "tool_called" && rawItem?.type === "function_call") {
+      if (
+        sdkEvent.name === "tool_called" &&
+        rawItem?.type === "function_call"
+      ) {
         const name = rawItem.name ?? "unknown";
         const tool = toolIdentity(name);
         yield {
