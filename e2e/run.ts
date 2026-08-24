@@ -197,8 +197,13 @@ async function main(): Promise<void> {
       console.log(`\n--keep: left ${traces.length} messages in Slack`);
       return;
     }
-    const removed = await cleanUp(traces, config.bot, config.driver);
-    console.log(`\ncleaned up ${removed}/${traces.length} messages`);
+    const result = await cleanUp(traces, config.bot, config.driver);
+    console.log(`\ncleaned up ${result.removed}/${result.attempted} messages`);
+    for (const left of result.residue) {
+      // Loud, not swallowed: a run that leaves messages behind has not
+      // finished, even if every cycle passed.
+      console.log(`  LEFT BEHIND ${left.channel}/${left.ts}: ${left.reason}`);
+    }
   };
 
   // A killed run must not leave the channel dirty.

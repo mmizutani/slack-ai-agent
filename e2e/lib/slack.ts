@@ -8,7 +8,12 @@
  * bodies are not universally supported on the older read methods.
  */
 
+import { retryDelayMs } from "./rate-limit";
+
 const SLACK_API = "https://slack.com/api";
+
+/** Attempts for a call Slack rate-limits. Teardown deletes in bursts. */
+const MAX_RATE_LIMIT_RETRIES = 5;
 
 export class SlackApiError extends Error {
   constructor(
@@ -48,14 +53,23 @@ export class SlackApi {
       if (value !== undefined) form.set(key, String(value));
     }
 
-    const response = await fetch(`${SLACK_API}/${method}`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${this.token}`,
-        "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
-      },
-      body: form,
-    });
+    let response!: Response;
+    for (let attempt = 0; ; attempt += 1) {
+      response = await fetch(`${SLACK_API}/${method}`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
+        },
+        body: form,
+      });
+
+      // Teardown deletes every message a run created, in a burst, and
+      // chat.delete is rate-limited. Swallowing the 429 left messages behind
+      // in the channel while the run still reported success.
+      if (response.status !== 429 || attempt >= MAX_RATE_LIMIT_RETRIES) break;
+      await sleep(retryDelayMs(response.headers.get("retry-after")));
+    }
 
     const payload = (await response.json()) as Record<string, unknown>;
     if (payload.ok !== true) {

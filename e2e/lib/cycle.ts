@@ -171,22 +171,42 @@ export function makeContext(options: {
  * delete its own messages. Failures are swallowed per message so one
  * already-deleted message cannot abort the rest of the cleanup.
  */
+export interface CleanUpResult {
+  removed: number;
+  attempted: number;
+  /** Messages still in Slack, with the reason each could not be removed. */
+  residue: { channel: string; ts: string; reason: string }[];
+}
+
 export async function cleanUp(
   traces: readonly Trace[],
   bot: SlackApi,
   driver: SlackApi,
-): Promise<number> {
+): Promise<CleanUpResult> {
+  // The same message can be tracked more than once — a cycle may both await a
+  // reply and re-read the thread — and a second delete would look like a
+  // failure that is not one.
+  const unique = new Map<string, Trace>();
+  for (const trace of traces) unique.set(`${trace.channel}:${trace.ts}`, trace);
+
+  const residue: CleanUpResult["residue"] = [];
   let removed = 0;
-  for (const trace of [...traces].reverse()) {
+  for (const trace of [...unique.values()].reverse()) {
     try {
       await (trace.as === "bot" ? bot : driver).deleteMessage(
         trace.channel,
         trace.ts,
       );
       removed += 1;
-    } catch {
-      // Already gone, or never posted. Nothing to do.
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "unknown";
+      // message_not_found means it is already gone, which is the goal.
+      if (/message_not_found/.test(reason)) {
+        removed += 1;
+        continue;
+      }
+      residue.push({ channel: trace.channel, ts: trace.ts, reason });
     }
   }
-  return removed;
+  return { removed, attempted: unique.size, residue };
 }

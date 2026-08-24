@@ -324,6 +324,10 @@ State these in any report; they bound what a green run means.
   a member of.
 - Never prints a token, an Authorization header, or a raw provider payload.
 - Deletes every message it created, on success and on failure, and on SIGINT.
+  `chat.delete` is rate-limited and teardown deletes in a burst, so the client
+  honours `Retry-After`; anything it still cannot remove is printed as
+  `LEFT BEHIND`, because a run that leaves messages in the channel has not
+  finished even if every cycle passed.
 - Captures and restores any deployment config it writes.
 - Bounded per-cycle timeouts; only `provider-error` raises its own, and says why.
 
