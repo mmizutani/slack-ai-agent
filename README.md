@@ -78,7 +78,7 @@ Copy the example configs and customize for your workspace:
 #### Required
 
 | Example file                                      | Copy to                                   | Purpose                                                     |
-| ------------------------------------------------- | ------------------------------------------ | ----------------------------------------------------------- |
+| ------------------------------------------------- | ----------------------------------------- | ----------------------------------------------------------- |
 | `config/example-emojis.yaml`                      | `config/emojis.yaml`                      | Emoji reactions for thinking, completion, errors            |
 | `config/example-tool-allowlist.yaml`              | `config/tool-allowlist.yaml`              | Role-based tool access control (key order = role hierarchy) |
 | `config/example-tool-denylist.yaml`               | `config/tool-denylist.yaml`               | Tools the bot must never use                                |
@@ -87,7 +87,7 @@ Copy the example configs and customize for your workspace:
 #### Optional
 
 | Example file                                             | Copy to                               | Purpose                                                                |
-| --------------------------------------------------------- | -------------------------------------- | ------------------------------------------------------------------------ |
+| -------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------- |
 | `config/example-channels.yaml`                           | `config/channels.yaml`                | Channel auto-reply routing, keyword triggers, ephemeral summaries      |
 | `config/instructions/example-channel.txt`                | `config/instructions/<name>.txt`      | Channel-specific system prompt context (referenced by `channels.yaml`) |
 | `config/subagents/example-subagents.yaml`                | `config/subagents/<name>.yaml`        | Sub-agents for validation or post-processing                           |
@@ -149,6 +149,34 @@ pnpm exec jest src/logger   # run tests matching a pattern
 ```
 
 Tests use [Jest](https://jestjs.io/) with `ts-jest`. Test files live next to their source files as `*.test.ts`.
+
+The unit suite is kept offline by `src/test-support/offline-guard.ts`, which
+scrubs provider credentials and refuses outbound sockets, so it can never bill a
+provider.
+
+## Live verification
+
+`e2e/` drives the real bot in a real Slack workspace, once per runtime, and is
+how a change is confirmed to work end to end. It is excluded from `pnpm test`
+and from CI: it needs live credentials and spends provider money.
+
+```bash
+E2E_LIVE=1 pnpm e2e:live --channel C0123456789     # both runtimes, all cycles
+E2E_LIVE=1 pnpm e2e:live --channel C… --provider openai
+E2E_LIVE=1 pnpm e2e:live --channel C… --cycle mcp-tool
+E2E_LIVE=1 pnpm e2e:live --channel C… --keep       # leave messages for inspection
+```
+
+It refuses to run without `E2E_LIVE=1`, refuses any channel whose name does not
+contain `test`, deletes every message it creates, and restores any deployment
+config it had to write. Results land in `e2e/report/<runId>.json`, with the
+app's own output in `e2e/report/<runId>-<phase>.log`.
+
+Cost is a few cents per full run: the phases pin the cheap model tier, and the
+failure-path cycle uses a local endpoint rather than a provider.
+
+Design, cycle list and known limits:
+[`docs/goals/2026-08-25-live-slack-e2e-verification-goal.md`](docs/goals/2026-08-25-live-slack-e2e-verification-goal.md).
 
 ## License
 
