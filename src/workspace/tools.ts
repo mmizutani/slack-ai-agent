@@ -19,7 +19,9 @@ const DEFAULT_LIMITS: Required<WorkspaceToolLimits> = {
   maxTraversalEntries: 2_000,
 };
 
-function limits(overrides?: WorkspaceToolLimits): Required<WorkspaceToolLimits> {
+function limits(
+  overrides?: WorkspaceToolLimits,
+): Required<WorkspaceToolLimits> {
   return { ...DEFAULT_LIMITS, ...overrides };
 }
 
@@ -39,33 +41,41 @@ export async function readWorkspaceFile(
 ): Promise<WorkspaceReadResult> {
   const config = limits(overrides);
   const resolved = resolveWorkspacePath(root, requestedPath);
-  const stat = await fs.promises.stat(resolved);
-  if (!stat.isFile()) throw new Error("Workspace path is not a file");
-  if (stat.size > config.maxFileBytes) {
-    return {
-      kind: "binary",
-      path: workspaceRelativePath(root, resolved),
-      size: stat.size,
-      message: `File exceeds the ${config.maxFileBytes}-byte workspace limit.`,
-    };
-  }
-  const buffer = await fs.promises.readFile(resolved);
   const relative = workspaceRelativePath(root, resolved);
-  if (isBinary(buffer)) {
+  // Open once and validate the descriptor. Separate stat and readFile calls
+  // each resolve the path again, so the file whose type and size were checked
+  // need not be the file that is read.
+  const handle = await fs.promises.open(resolved, "r");
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) throw new Error("Workspace path is not a file");
+    if (stat.size > config.maxFileBytes) {
+      return {
+        kind: "binary",
+        path: relative,
+        size: stat.size,
+        message: `File exceeds the ${config.maxFileBytes}-byte workspace limit.`,
+      };
+    }
+    const buffer = await handle.readFile();
+    if (isBinary(buffer)) {
+      return {
+        kind: "binary",
+        path: relative,
+        size: stat.size,
+        message: "Binary files are not readable by the text workspace tool.",
+      };
+    }
+    const text = buffer.toString("utf8");
     return {
-      kind: "binary",
+      kind: "text",
       path: relative,
-      size: stat.size,
-      message: "Binary files are not readable by the text workspace tool.",
+      content: text.slice(0, config.maxOutputChars),
+      truncated: text.length > config.maxOutputChars,
     };
+  } finally {
+    await handle.close();
   }
-  const text = buffer.toString("utf8");
-  return {
-    kind: "text",
-    path: relative,
-    content: text.slice(0, config.maxOutputChars),
-    truncated: text.length > config.maxOutputChars,
-  };
 }
 
 export async function listWorkspaceFiles(
@@ -145,7 +155,10 @@ export async function searchWorkspaceText(
     maxOutputChars: Number.MAX_SAFE_INTEGER,
   });
   const matches: Array<{ path: string; line: number; text: string }> = [];
-  let outputChars = 0;
+  // The caller receives a JSON array, so the enclosing brackets are part of the
+  // output being bounded; each match after the first also costs its comma.
+  const JSON_ARRAY_BRACKETS = 2;
+  let outputChars = JSON_ARRAY_BRACKETS;
   let outputTruncated = false;
   for (const relative of listed.entries) {
     if (matches.length >= config.maxMatches || outputTruncated) break;
@@ -188,7 +201,10 @@ export async function searchWorkspaceText(
 
 /** Provider-neutral function definitions; runtime adapters construct SDK tools. */
 export interface WorkspaceToolDefinition {
-  name: "workspace_read_file" | "workspace_list_files" | "workspace_search_text";
+  name:
+    | "workspace_read_file"
+    | "workspace_list_files"
+    | "workspace_search_text";
   description: string;
   parameters: unknown;
   execute(input: unknown): Promise<string>;
@@ -211,7 +227,9 @@ export function buildWorkspaceTools(
       description: "List bounded entries in the current Slack workspace.",
       parameters: z.object({ path: z.string().optional() }),
       execute: async (input: any) =>
-        JSON.stringify(await listWorkspaceFiles(root, input.path ?? ".", overrides)),
+        JSON.stringify(
+          await listWorkspaceFiles(root, input.path ?? ".", overrides),
+        ),
     },
     {
       name: "workspace_search_text",

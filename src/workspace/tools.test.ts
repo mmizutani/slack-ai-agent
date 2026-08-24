@@ -1,7 +1,11 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
-import { readWorkspaceFile, searchWorkspaceText, listWorkspaceFiles } from "./tools";
+import {
+  readWorkspaceFile,
+  searchWorkspaceText,
+  listWorkspaceFiles,
+} from "./tools";
 
 describe("bounded workspace tools", () => {
   let root: string;
@@ -9,11 +13,16 @@ describe("bounded workspace tools", () => {
     root = fs.mkdtempSync(path.join(os.tmpdir(), "workspace-tools-"));
     fs.mkdirSync(path.join(root, "docs"));
     fs.writeFileSync(path.join(root, "docs", "readme.txt"), "alpha\nbeta\n");
-    fs.writeFileSync(path.join(root, "docs", "image.bin"), Buffer.from([0, 1, 2]));
+    fs.writeFileSync(
+      path.join(root, "docs", "image.bin"),
+      Buffer.from([0, 1, 2]),
+    );
   });
 
   it("reads text with a bounded output", async () => {
-    await expect(readWorkspaceFile(root, "docs/readme.txt", { maxOutputChars: 5 })).resolves.toEqual({
+    await expect(
+      readWorkspaceFile(root, "docs/readme.txt", { maxOutputChars: 5 }),
+    ).resolves.toEqual({
       kind: "text",
       path: "docs/readme.txt",
       content: "alpha",
@@ -22,18 +31,24 @@ describe("bounded workspace tools", () => {
   });
 
   it("returns a capability message for binary files", async () => {
-    await expect(readWorkspaceFile(root, "docs/image.bin")).resolves.toMatchObject({
+    await expect(
+      readWorkspaceFile(root, "docs/image.bin"),
+    ).resolves.toMatchObject({
       kind: "binary",
       path: "docs/image.bin",
     });
   });
 
   it("bounds list and search results", async () => {
-    await expect(listWorkspaceFiles(root, ".", { maxEntries: 1 })).resolves.toMatchObject({
+    await expect(
+      listWorkspaceFiles(root, ".", { maxEntries: 1 }),
+    ).resolves.toMatchObject({
       entries: expect.any(Array),
       truncated: true,
     });
-    await expect(searchWorkspaceText(root, "a", { maxMatches: 1 })).resolves.toMatchObject({
+    await expect(
+      searchWorkspaceText(root, "a", { maxMatches: 1 }),
+    ).resolves.toMatchObject({
       matches: expect.any(Array),
       truncated: true,
     });
@@ -44,7 +59,9 @@ describe("bounded workspace tools", () => {
     expect(listed.entries.join("\n").length).toBeLessThanOrEqual(10);
     expect(listed.truncated).toBe(true);
 
-    const searched = await searchWorkspaceText(root, "a", { maxOutputChars: 60 });
+    const searched = await searchWorkspaceText(root, "a", {
+      maxOutputChars: 60,
+    });
     expect(JSON.stringify(searched.matches).length).toBeLessThanOrEqual(60);
     expect(searched.truncated).toBe(true);
   });
@@ -68,8 +85,33 @@ describe("bounded workspace tools", () => {
     ]);
   });
 
+  // The serialized result is a JSON array, so the two brackets are part of the
+  // payload the caller has to carry. Budgeting only the objects and their
+  // separating commas lets the result exceed maxOutputChars.
+  it("counts the JSON array brackets in the search output budget", async () => {
+    fs.writeFileSync(path.join(root, "docs", "hit.txt"), "needle\n");
+
+    const one = await searchWorkspaceText(root, "needle", {
+      maxOutputChars: Number.MAX_SAFE_INTEGER,
+    });
+    expect(one.matches).toHaveLength(1);
+    const exact = JSON.stringify(one.matches).length;
+
+    // At exactly the serialized length the single match still fits.
+    await expect(
+      searchWorkspaceText(root, "needle", { maxOutputChars: exact }),
+    ).resolves.toMatchObject({ matches: one.matches });
+
+    // One character short it does not, and the result says so.
+    await expect(
+      searchWorkspaceText(root, "needle", { maxOutputChars: exact - 1 }),
+    ).resolves.toMatchObject({ matches: [], truncated: true });
+  });
+
   it("skips cyclic, broken, and escaping symlinks while listing", async () => {
-    const outside = fs.mkdtempSync(path.join(os.tmpdir(), "workspace-outside-"));
+    const outside = fs.mkdtempSync(
+      path.join(os.tmpdir(), "workspace-outside-"),
+    );
     fs.writeFileSync(path.join(outside, "secret.txt"), "secret");
     fs.symlinkSync("..", path.join(root, "docs", "cycle"));
     fs.symlinkSync(
@@ -80,10 +122,7 @@ describe("bounded workspace tools", () => {
 
     const listed = await listWorkspaceFiles(root);
 
-    expect(listed.entries).toEqual([
-      "docs/image.bin",
-      "docs/readme.txt",
-    ]);
+    expect(listed.entries).toEqual(["docs/image.bin", "docs/readme.txt"]);
     expect(listed.truncated).toBe(false);
   });
 
