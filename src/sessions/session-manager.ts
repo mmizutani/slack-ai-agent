@@ -52,6 +52,7 @@ export class SessionManager {
     threadTs?: string,
   ): ConversationSession {
     const sessionKey = this.getSessionKey(userId, channelId, threadTs);
+    this.resolvePendingWorkspace(sessionKey);
     const session: ConversationSession = {
       userId,
       channelId,
@@ -115,6 +116,21 @@ export class SessionManager {
         this.destroyWorkspaceOnce(key);
       }
     }
+  }
+
+  /**
+   * Settle a queued cleanup before its path is handed to a new session.
+   *
+   * Session keys are deterministic and the workspace path derives from the key,
+   * so recreating a thread's session reuses the exact directory a failed
+   * cleanup left queued. Try once more to clear it out, then drop the key
+   * regardless: the path now belongs to a live conversation, and a sweep that
+   * still held the key would delete that conversation's workspace.
+   */
+  private resolvePendingWorkspace(sessionKey: string): void {
+    if (!this.pendingWorkspaceCleanup.has(sessionKey)) return;
+    this.destroyWorkspaceOnce(sessionKey);
+    this.pendingWorkspaceCleanup.delete(sessionKey);
   }
 
   /**

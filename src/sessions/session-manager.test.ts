@@ -88,6 +88,30 @@ describe("SessionManager", () => {
     expect(destroyWorkspace).toHaveBeenCalledTimes(2);
   });
 
+  // Session keys are deterministic and the workspace path derives from the key,
+  // so recreating a thread's session reuses the exact directory a failed
+  // cleanup left queued. Without resolving the queue entry, the next sweep
+  // deletes a live conversation's workspace.
+  it("does not delete a workspace recreated while its cleanup was pending", () => {
+    const destroyWorkspace = jest.fn(() => {
+      throw new Error("EBUSY");
+    });
+    const manager = new SessionManager({ destroyWorkspace });
+    manager.createSession("U1", "C2", "111.222").lastActivity = new Date(0);
+
+    manager.cleanupInactiveSessions(1);
+    expect(destroyWorkspace).toHaveBeenCalledTimes(1);
+
+    const recreated = manager.createSession("U1", "C2", "111.222");
+    destroyWorkspace.mockClear();
+
+    // Nothing is expired now, so the sweep must leave the live session alone.
+    manager.cleanupInactiveSessions(60_000);
+
+    expect(destroyWorkspace).not.toHaveBeenCalled();
+    expect(manager.getSession("U1", "C2", "111.222")).toBe(recreated);
+  });
+
   it("clears incompatible continuation state when the provider changes", () => {
     const manager = new SessionManager();
     const session = manager.createSession("U1", "C2", "111.222");
