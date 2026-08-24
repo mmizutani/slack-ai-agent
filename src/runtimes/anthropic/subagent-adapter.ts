@@ -10,6 +10,20 @@ export interface ClaudeSubagentDefinition {
   maxTurns?: number;
 }
 
+const DEFAULT_CLAUDE_SUBAGENT_MODEL = "sonnet";
+
+/**
+ * A subagent YAML file may declare a model for either provider. Handing an
+ * OpenAI name to Claude produces a provider rejection at run time, so fall back
+ * to the Claude default. The OpenAI adapter guards the mirror-image case in
+ * modelFor.
+ */
+function modelFor(definition: SubagentDefinition): string {
+  return definition.model?.provider === "anthropic"
+    ? definition.model.model
+    : DEFAULT_CLAUDE_SUBAGENT_MODEL;
+}
+
 /** Map provider-neutral definitions to Claude's options.agents shape. */
 export function toClaudeSubagentDefinitions(
   definitions: readonly SubagentDefinition[],
@@ -28,7 +42,7 @@ export function toClaudeSubagentDefinitions(
         {
           description: definition.description,
           prompt: definition.instructions,
-          model: definition.model?.model ?? "sonnet",
+          model: modelFor(definition),
           // Always provide the computed list, including an empty list. An
           // omitted Claude `tools` field can otherwise restore provider
           // defaults and accidentally broaden an unknown/denied role.
