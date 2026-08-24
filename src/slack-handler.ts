@@ -102,9 +102,18 @@ type SlackSessionManager = Pick<
   | "getSession"
   | "createSession"
   | "cleanupInactiveSessions"
+  | "touchSession"
   | "clearProviderState"
   | "activateProvider"
 >;
+
+/** Give a legacy owner's session the providerState its type already promises. */
+function withProviderState(
+  session: ConversationSession | undefined,
+): ConversationSession | undefined {
+  if (session && !session.providerState) session.providerState = {};
+  return session;
+}
 
 export class SlackHandler {
   private app: App;
@@ -165,10 +174,15 @@ export class SlackHandler {
       ({
         getSessionKey: (...args: Parameters<SessionOwner["getSessionKey"]>) =>
           (legacySessionOwner.getSessionKey as any)(...args),
+        // A legacy owner predates providerState, and every consumer indexes
+        // into it unguarded. Establish the invariant the ConversationSession
+        // type already promises, once, at the boundary that can violate it.
         getSession: (...args: Parameters<SessionOwner["getSession"]>) =>
-          (legacySessionOwner.getSession as any)(...args),
+          withProviderState((legacySessionOwner.getSession as any)(...args)),
         createSession: (...args: Parameters<SessionOwner["createSession"]>) =>
-          (legacySessionOwner.createSession as any)(...args),
+          withProviderState(
+            (legacySessionOwner.createSession as any)(...args),
+          )!,
         cleanupInactiveSessions: (
           ...args: Parameters<SessionOwner["cleanupInactiveSessions"]>
         ) => (legacySessionOwner.cleanupInactiveSessions as any)(...args),
@@ -202,6 +216,9 @@ export class SlackHandler {
           }
           session.activeProvider = provider;
           return changed;
+        },
+        touchSession: (session: ConversationSession) => {
+          session.lastActivity = new Date();
         },
       } satisfies SlackSessionManager);
     this.runtimeRegistry = runtimeRegistry;
@@ -1218,6 +1235,10 @@ export class SlackHandler {
         event.thread_ts || event.ts,
       );
     }
+    // cleanupInactiveSessions evicts on lastActivity, which createSession
+    // stamps once. Without this an active thread loses its workspace and
+    // provider continuation state the moment it outlives the max age.
+    this.sessionManager.touchSession(session);
     return session;
   }
 

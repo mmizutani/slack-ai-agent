@@ -11,6 +11,9 @@ export interface WorkspaceToolLimits {
   maxTraversalEntries?: number;
 }
 
+/** Both brackets of the JSON array a bounded result is serialized into. */
+const JSON_ARRAY_BRACKETS = 2;
+
 const DEFAULT_LIMITS: Required<WorkspaceToolLimits> = {
   maxFileBytes: 1_000_000,
   maxOutputChars: 20_000,
@@ -23,6 +26,36 @@ function limits(
   overrides?: WorkspaceToolLimits,
 ): Required<WorkspaceToolLimits> {
   return { ...DEFAULT_LIMITS, ...overrides };
+}
+
+/**
+ * Escaped length of `text` as it appears inside a JSON string, excluding the
+ * enclosing quotes. buildWorkspaceTools serializes every result with
+ * JSON.stringify and escaping expands: a control character becomes six
+ * characters, a quote or backslash two.
+ */
+function escapedLength(text: string): number {
+  return JSON.stringify(text).length - 2;
+}
+
+/**
+ * Longest prefix of `text` whose escaped form fits `maxChars`.
+ *
+ * The limit counts the characters the caller actually receives, so plain ASCII
+ * costs exactly its length — unchanged — while escape expansion is now charged
+ * for. Without this a file of control characters passed a 20,000-character
+ * limit and serialized to roughly 120,000.
+ */
+function boundSerialized(text: string, maxChars: number): string {
+  if (escapedLength(text) <= maxChars) return text;
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    if (escapedLength(text.slice(0, mid)) <= maxChars) low = mid;
+    else high = mid - 1;
+  }
+  return text.slice(0, low);
 }
 
 function isBinary(buffer: Buffer): boolean {
@@ -67,11 +100,12 @@ export async function readWorkspaceFile(
       };
     }
     const text = buffer.toString("utf8");
+    const content = boundSerialized(text, config.maxOutputChars);
     return {
       kind: "text",
       path: relative,
-      content: text.slice(0, config.maxOutputChars),
-      truncated: text.length > config.maxOutputChars,
+      content,
+      truncated: content.length < text.length,
     };
   } finally {
     await handle.close();
@@ -120,16 +154,19 @@ export async function listWorkspaceFiles(
     }
   }
   const boundedEntries: string[] = [];
-  let outputChars = 0;
+  // Entries are returned as a JSON array, so the two brackets are part of the
+  // payload and each path costs its escaped length, not its decoded length.
+  let outputChars = JSON_ARRAY_BRACKETS;
   let outputTruncated = false;
   for (const entry of entries.slice(0, config.maxEntries)) {
     const separator = boundedEntries.length > 0 ? 1 : 0;
-    if (outputChars + separator + entry.length > config.maxOutputChars) {
+    const cost = separator + JSON.stringify(entry).length;
+    if (outputChars + cost > config.maxOutputChars) {
       outputTruncated = true;
       break;
     }
     boundedEntries.push(entry);
-    outputChars += separator + entry.length;
+    outputChars += cost;
   }
   const truncated =
     traversalTruncated ||
@@ -157,7 +194,6 @@ export async function searchWorkspaceText(
   const matches: Array<{ path: string; line: number; text: string }> = [];
   // The caller receives a JSON array, so the enclosing brackets are part of the
   // output being bounded; each match after the first also costs its comma.
-  const JSON_ARRAY_BRACKETS = 2;
   let outputChars = JSON_ARRAY_BRACKETS;
   let outputTruncated = false;
   for (const relative of listed.entries) {

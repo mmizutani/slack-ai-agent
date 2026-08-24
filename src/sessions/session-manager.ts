@@ -17,6 +17,12 @@ export interface SessionManagerOptions {
 /** Owns Slack conversation identity, workspace lifecycle, and provider state. */
 export class SessionManager {
   private readonly sessions = new Map<string, ConversationSession>();
+  /**
+   * Workspace keys whose destruction failed. The session is already gone from
+   * `sessions` — a half-cleaned session must not stay resumable — so this is
+   * the only remaining handle on the directory left behind.
+   */
+  private readonly pendingWorkspaceCleanup = new Set<string>();
   private readonly provisionWorkspace: (sessionKey: string) => string;
   private readonly destroyWorkspace: (sessionKey: string) => void;
   private readonly now: () => Date;
@@ -100,17 +106,29 @@ export class SessionManager {
 
   cleanupInactiveSessions(maxAge: number = DEFAULT_SESSION_MAX_AGE_MS): void {
     const now = this.now().getTime();
+    for (const key of [...this.pendingWorkspaceCleanup]) {
+      this.destroyWorkspaceOnce(key);
+    }
     for (const [key, session] of this.sessions.entries()) {
       if (now - session.lastActivity.getTime() > maxAge) {
         this.sessions.delete(key);
-        try {
-          this.destroyWorkspace(key);
-        } catch {
-          // The sweep runs from a setInterval callback: one workspace that
-          // cannot be removed must not abandon the remaining sessions or
-          // escape as an unhandled exception.
-        }
+        this.destroyWorkspaceOnce(key);
       }
+    }
+  }
+
+  /**
+   * Destroy one workspace, keeping the key for a later sweep if it fails. The
+   * sweep runs from a setInterval callback, so a failure must neither abandon
+   * the remaining sessions nor escape as an unhandled exception — but it must
+   * not be swallowed either, or the directory is left on disk for good.
+   */
+  private destroyWorkspaceOnce(sessionKey: string): void {
+    try {
+      this.destroyWorkspace(sessionKey);
+      this.pendingWorkspaceCleanup.delete(sessionKey);
+    } catch {
+      this.pendingWorkspaceCleanup.add(sessionKey);
     }
   }
 }

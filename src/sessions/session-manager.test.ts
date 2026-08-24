@@ -66,6 +66,28 @@ describe("SessionManager", () => {
     }
   });
 
+  it("retries a failed workspace destruction on the next sweep", () => {
+    let failures = 1;
+    const destroyWorkspace = jest.fn((key: string) => {
+      if (key === "U1-C2-flaky" && failures-- > 0) throw new Error("EBUSY");
+    });
+    const manager = new SessionManager({ destroyWorkspace });
+    manager.createSession("U1", "C2", "flaky").lastActivity = new Date(0);
+
+    manager.cleanupInactiveSessions(1);
+    expect(destroyWorkspace).toHaveBeenCalledTimes(1);
+    // The session is gone from memory either way — a half-cleaned session must
+    // not be resumable — but the workspace is still on disk.
+    expect(manager.getSession("U1", "C2", "flaky")).toBeUndefined();
+
+    manager.cleanupInactiveSessions(1);
+    expect(destroyWorkspace).toHaveBeenCalledTimes(2);
+
+    // Once it succeeds the key is dropped; later sweeps do not retry forever.
+    manager.cleanupInactiveSessions(1);
+    expect(destroyWorkspace).toHaveBeenCalledTimes(2);
+  });
+
   it("clears incompatible continuation state when the provider changes", () => {
     const manager = new SessionManager();
     const session = manager.createSession("U1", "C2", "111.222");

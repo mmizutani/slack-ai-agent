@@ -354,6 +354,46 @@ describe("SlackHandler", () => {
       expect(session.sessionId).toBeUndefined();
     });
 
+    // A legacy session owner predates providerState. Every consumer indexes
+    // into it unguarded, so the shim has to establish the invariant its
+    // ConversationSession type already promises.
+    it("gives a legacy session a providerState object", () => {
+      t.claudeHandler.createSession.mockReturnValue({
+        workingDirectory: "/tmp/work",
+      });
+      t.claudeHandler.getSession.mockReturnValue({
+        workingDirectory: "/tmp/work",
+      });
+
+      expect(
+        priv(handler).sessionManager.createSession("U1", "C1", "1.1")
+          .providerState,
+      ).toEqual({});
+      expect(
+        priv(handler).sessionManager.getSession("U1", "C1", "1.1")
+          .providerState,
+      ).toEqual({});
+    });
+
+    it("leaves an existing providerState untouched", () => {
+      const providerState = {
+        openai: {
+          provider: "openai",
+          mode: "previous_response_id",
+          previousResponseId: "resp-1",
+        },
+      };
+      t.claudeHandler.getSession.mockReturnValue({
+        workingDirectory: "/tmp/work",
+        providerState,
+      });
+
+      expect(
+        priv(handler).sessionManager.getSession("U1", "C1", "1.1")
+          .providerState,
+      ).toBe(providerState);
+    });
+
     it("clears every provider when none is named", () => {
       const session = makeSession();
 
@@ -362,6 +402,22 @@ describe("SlackHandler", () => {
       expect(session.providerState).toEqual({});
       expect(session.sessionId).toBeUndefined();
     });
+  });
+
+  // cleanupInactiveSessions evicts on lastActivity, which createSession stamps
+  // once. Without a refresh an active thread loses its workspace and provider
+  // continuation state as soon as it outlives the max age from creation.
+  it("refreshes lastActivity when an existing session is reused", async () => {
+    const session = {
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(0),
+    };
+    t.claudeHandler.getSession.mockReturnValue(session);
+
+    await priv(handler).getOrCreateSession(makeEvent());
+
+    expect(session.lastActivity.getTime()).toBeGreaterThan(0);
   });
 
   it("records provider-neutral total timing and Claude compatibility timing only for Anthropic", () => {

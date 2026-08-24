@@ -30,6 +30,41 @@ describe("bounded workspace tools", () => {
     });
   });
 
+  // buildWorkspaceTools serializes these results with JSON.stringify. Escaping
+  // expands control characters sixfold and doubles quotes and backslashes, so a
+  // limit applied to the decoded text does not bound the payload the model
+  // actually receives.
+  it("bounds read output by its serialized length", async () => {
+    fs.writeFileSync(
+      path.join(root, "docs", "control.txt"),
+      "\u0001".repeat(200),
+    );
+
+    const result = await readWorkspaceFile(root, "docs/control.txt", {
+      maxOutputChars: 40,
+    });
+
+    expect(result.kind).toBe("text");
+    if (result.kind !== "text") throw new Error("expected text");
+    expect(JSON.stringify(result.content).length).toBeLessThanOrEqual(40);
+    expect(result.content.length).toBeGreaterThan(0);
+    expect(result.truncated).toBe(true);
+  });
+
+  it("bounds list output by the serialized entry length", async () => {
+    fs.mkdirSync(path.join(root, "esc"));
+    // 24 characters decoded, 29 serialized: a budget between the two accepts
+    // the entry on decoded length and then overruns.
+    fs.writeFileSync(path.join(root, "esc", 'say "hi" \\ again.txt'), "x");
+
+    const listed = await listWorkspaceFiles(root, "esc", {
+      maxOutputChars: 28,
+    });
+
+    expect(JSON.stringify(listed.entries).length).toBeLessThanOrEqual(28);
+    expect(listed.truncated).toBe(true);
+  });
+
   it("returns a capability message for binary files", async () => {
     await expect(
       readWorkspaceFile(root, "docs/image.bin"),

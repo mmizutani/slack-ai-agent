@@ -189,14 +189,23 @@ export async function* adaptAnthropicStream(
       }
     }
   } catch (error) {
-    terminalEmitted = true;
-    if (options.signal?.aborted || (error as any)?.name === "AbortError") {
-      yield terminal("cancelled", { reason: "aborted", usage: terminalUsage });
-    } else {
-      yield terminal("failed", {
-        reason: error instanceof Error ? error.message : String(error),
-        usage: terminalUsage,
-      });
+    // Breaking out of the loop after a terminal runs the source iterator's
+    // cleanup, which can throw and land here. The run is already decided at
+    // that point, and MessageProcessor keeps the last terminal it sees — so a
+    // second one would rewrite a completed run into a failure.
+    if (!terminalEmitted) {
+      terminalEmitted = true;
+      if (options.signal?.aborted || (error as any)?.name === "AbortError") {
+        yield terminal("cancelled", {
+          reason: "aborted",
+          usage: terminalUsage,
+        });
+      } else {
+        yield terminal("failed", {
+          reason: error instanceof Error ? error.message : String(error),
+          usage: terminalUsage,
+        });
+      }
     }
   }
 

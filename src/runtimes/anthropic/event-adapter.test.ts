@@ -10,6 +10,42 @@ async function collect(
 }
 
 describe("Anthropic event adapter", () => {
+  // Breaking out of `for await` after the terminal runs the source iterator's
+  // cleanup. A throw from there must not be reported as a second terminal —
+  // MessageProcessor keeps the last one it sees, so a completed run would be
+  // rewritten into a failure and the user would get the generic error.
+  it("keeps one terminal when the source iterator throws during cleanup", async () => {
+    const source = {
+      [Symbol.asyncIterator]() {
+        let sent = false;
+        return {
+          async next() {
+            if (sent) return { value: undefined, done: true as const };
+            sent = true;
+            return {
+              value: {
+                type: "result",
+                subtype: "success",
+                result: "done",
+              } as any,
+              done: false as const,
+            };
+          },
+          async return() {
+            throw new Error("source cleanup failed");
+          },
+        };
+      },
+    };
+
+    const events = await collect(adaptAnthropicStream(source as any));
+
+    const terminals = events.filter(event => event.type === "terminal");
+    expect(terminals).toEqual([
+      expect.objectContaining({ outcome: "completed", finalText: "done" }),
+    ]);
+  });
+
   // The in-process custom-action MCP server returns these flags as
   // structuredContent (see runtimes/anthropic/action-adapter). The SDK surfaces
   // the full tool Output object on the user message as tool_use_result, not on
