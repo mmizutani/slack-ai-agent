@@ -1,5 +1,4 @@
 import { App } from "@slack/bolt";
-import { ClaudeHandler } from "./claude-handler";
 import { FileHandler, ProcessedFile } from "./file-handler";
 import { Logger, withMessageId, truncateForLog } from "./logger";
 import { config } from "./config";
@@ -12,7 +11,11 @@ import {
 import { MessageProcessor } from "./message-processor";
 import { ButtonMetadataStore } from "./button-metadata";
 import { splitMessageForSlack } from "./message-splitter";
-import { resolveMode } from "./request-mode";
+import {
+  mergeChannelModeDefaults,
+  resolveMode,
+  type RequestMode,
+} from "./request-mode";
 import {
   passesSmartReplyStructuralFilter,
   classifySmartReplyCandidate,
@@ -23,7 +26,15 @@ import {
   SlackContext,
   ConversationSession,
   PhaseTimings,
+  AgentProviderId,
 } from "./types";
+import { SessionManager } from "./sessions/session-manager";
+import { AgentRuntimeRegistry } from "./runtimes/registry";
+import { DENY_ALL_TOOL_POLICY, type RuntimeToolBundle } from "./agent/events";
+import { ModelRef, tryParseModelRef } from "./agent/model";
+import type { CustomActionRegistry } from "./custom-actions";
+import { McpManager } from "./mcp-manager";
+import { resolveMcpServers } from "./mcp/resolver";
 import {
   trackMessageProcessed,
   trackMessageFeedback,
@@ -33,6 +44,7 @@ import {
   isFullContentLoggingAllowed,
 } from "./tracking";
 import { UserUtils, redactChannelName } from "./user-utils";
+import { buildWorkspaceTools } from "./workspace/tools";
 import {
   CONTEXT_CACHE_TTL_MS,
   INCOMING_MESSAGE_LOG_MAX_LENGTH,
@@ -61,9 +73,54 @@ const isBotAuthoredMessage = (msg: {
   msg.subtype === "bot_message" ||
   msg.user === SLACKBOT_USER_ID;
 
+/** Minimal session-owner contract used by Slack orchestration. */
+interface SessionOwner {
+  getSessionKey(userId: string, channelId: string, threadTs?: string): string;
+  getSession(
+    userId: string,
+    channelId: string,
+    threadTs?: string,
+  ): ConversationSession | undefined;
+  createSession(
+    userId: string,
+    channelId: string,
+    threadTs?: string,
+  ): ConversationSession;
+  cleanupInactiveSessions(maxAge?: number): void;
+}
+
+/**
+ * The SessionManager surface this class depends on. Typing the field against it
+ * means a newly used SessionManager method has to be listed here, which in turn
+ * forces the legacy shim below to implement it. The previous
+ * `as unknown as SessionManager` cast let a missing or mismatched method
+ * through to run time.
+ */
+type SlackSessionManager = Pick<
+  SessionManager,
+  | "getSessionKey"
+  | "getSession"
+  | "createSession"
+  | "cleanupInactiveSessions"
+  | "touchSession"
+  | "clearProviderState"
+  | "activateProvider"
+>;
+
+/** Give a legacy owner's session the providerState its type already promises. */
+function withProviderState(
+  session: ConversationSession | undefined,
+): ConversationSession | undefined {
+  if (session && !session.providerState) session.providerState = {};
+  return session;
+}
+
 export class SlackHandler {
   private app: App;
-  private claudeHandler: ClaudeHandler;
+  private sessionManager: SlackSessionManager;
+  private runtimeRegistry?: AgentRuntimeRegistry;
+  private customActionRegistry?: CustomActionRegistry;
+  private mcpManager?: McpManager;
   private activeControllers: Map<string, AbortController> = new Map();
   private logger = new Logger("SlackHandler");
   private fileHandler: FileHandler;
@@ -99,17 +156,79 @@ export class SlackHandler {
 
   constructor(
     app: App,
-    claudeHandler: ClaudeHandler,
+    sessionOwner: SessionOwner,
     reactionManager: ReactionManager,
     channelConfig: ChannelConfigManager,
+    sessionManager?: SessionManager,
+    runtimeRegistry?: AgentRuntimeRegistry,
+    customActionRegistry?: CustomActionRegistry,
+    mcpManager?: McpManager,
   ) {
     this.app = app;
-    this.claudeHandler = claudeHandler;
+    const legacySessionOwner = sessionOwner as SessionOwner & {
+      getSessionManager?: () => SessionManager;
+    };
+    this.sessionManager =
+      sessionManager ??
+      legacySessionOwner.getSessionManager?.() ??
+      ({
+        getSessionKey: (...args: Parameters<SessionOwner["getSessionKey"]>) =>
+          (legacySessionOwner.getSessionKey as any)(...args),
+        // A legacy owner predates providerState, and every consumer indexes
+        // into it unguarded. Establish the invariant the ConversationSession
+        // type already promises, once, at the boundary that can violate it.
+        getSession: (...args: Parameters<SessionOwner["getSession"]>) =>
+          withProviderState((legacySessionOwner.getSession as any)(...args)),
+        createSession: (...args: Parameters<SessionOwner["createSession"]>) =>
+          withProviderState(
+            (legacySessionOwner.createSession as any)(...args),
+          )!,
+        cleanupInactiveSessions: (
+          ...args: Parameters<SessionOwner["cleanupInactiveSessions"]>
+        ) => (legacySessionOwner.cleanupInactiveSessions as any)(...args),
+        // Provider-scoped, matching SessionManager.clearProviderState: a
+        // coalesced burst on one provider must not discard the other
+        // provider's continuation state.
+        clearProviderState: (
+          session: ConversationSession,
+          provider?: AgentProviderId,
+        ) => {
+          if (provider) {
+            // A legacy session owner predates providerState and may hand back
+            // a session without it.
+            if (session.providerState) delete session.providerState[provider];
+            if (provider === "anthropic") session.sessionId = undefined;
+            return;
+          }
+          session.providerState = {};
+          session.sessionId = undefined;
+        },
+        activateProvider: (
+          session: ConversationSession,
+          provider: AgentProviderId,
+        ) => {
+          const changed =
+            session.activeProvider !== undefined &&
+            session.activeProvider !== provider;
+          if (changed) {
+            session.sessionId = undefined;
+            session.providerState = {};
+          }
+          session.activeProvider = provider;
+          return changed;
+        },
+        touchSession: (session: ConversationSession) => {
+          session.lastActivity = new Date();
+        },
+      } satisfies SlackSessionManager);
+    this.runtimeRegistry = runtimeRegistry;
+    this.customActionRegistry = customActionRegistry;
+    this.mcpManager = mcpManager;
     this.fileHandler = new FileHandler(app);
     this.channelConfig = channelConfig;
     this.reactionManager = reactionManager;
     this.messageProcessor = new MessageProcessor(
-      claudeHandler,
+      runtimeRegistry ?? new AgentRuntimeRegistry(),
       this.reactionManager,
       this.channelConfig,
     );
@@ -597,7 +716,7 @@ export class SlackHandler {
         timings.skip_and_auth_checks_ms = Date.now() - phaseStart;
         phaseStart = Date.now();
 
-        const sessionKey = this.claudeHandler.getSessionKey(
+        const sessionKey = this.sessionManager.getSessionKey(
           event.user,
           event.channel,
           event.thread_ts || event.ts,
@@ -653,7 +772,7 @@ export class SlackHandler {
         }
 
         // Compute once — used by both the multi-participant gate and
-        // processWithClaude (for SlackContext.isNonEphemeralConditionalChannel)
+        // processWithAgent (for SlackContext.isNonEphemeralConditionalChannel)
         const isNonEphemeralConditional =
           await this.channelConfig.isNonEphemeralConditionalChannel(
             event.channel,
@@ -697,7 +816,7 @@ export class SlackHandler {
         const abortController = this.activeControllers.get(sessionKey)!;
 
         // Process with Claude
-        const result = await this.processWithClaude(
+        const result = await this.processWithAgent(
           event,
           session,
           processedFiles,
@@ -1104,18 +1223,22 @@ export class SlackHandler {
   private async getOrCreateSession(
     event: MessageEvent,
   ): Promise<ConversationSession> {
-    let session = this.claudeHandler.getSession(
+    let session = this.sessionManager.getSession(
       event.user,
       event.channel,
       event.thread_ts || event.ts,
     );
     if (!session) {
-      session = this.claudeHandler.createSession(
+      session = this.sessionManager.createSession(
         event.user,
         event.channel,
         event.thread_ts || event.ts,
       );
     }
+    // cleanupInactiveSessions evicts on lastActivity, which createSession
+    // stamps once. Without this an active thread loses its workspace and
+    // provider continuation state the moment it outlives the max age.
+    this.sessionManager.touchSession(session);
     return session;
   }
 
@@ -1134,9 +1257,9 @@ export class SlackHandler {
   }
 
   /**
-   * Process message with Claude
+   * Process a message through the configured agent runtime.
    */
-  private async processWithClaude(
+  private async processWithAgent(
     event: MessageEvent,
     session: ConversationSession,
     processedFiles: ProcessedFile[],
@@ -1152,12 +1275,31 @@ export class SlackHandler {
     // so the single reply answers all of them, not just the latest. The
     // folded messages still appear in the thread context below, so the bot
     // keeps the full picture (including any file references).
-    const sessionKey = this.claudeHandler.getSessionKey(
+    const sessionKey = this.sessionManager.getSessionKey(
       event.user,
       event.channel,
       event.thread_ts || event.ts,
     );
     const combinedQuery = this.getCoalescedQuery(sessionKey);
+
+    const channelMode = await this.channelConfig.getChannelModelOverride(
+      event.channel,
+      event.channel_type,
+    );
+    const requestMode = resolveMode(
+      event.text,
+      mergeChannelModeDefaults(channelMode, config.agent.defaultModel),
+      !!event.explicitMention,
+      MODE_TRIGGER_EMOJIS,
+    );
+    const effectiveModel = this.resolveEffectiveModel(requestMode);
+    const runtimeProvider = effectiveModel.provider;
+    if (this.sessionManager.activateProvider(session, runtimeProvider)) {
+      this.logger.info("runtime_provider_changed", {
+        provider: runtimeProvider,
+        sessionKey,
+      });
+    }
 
     // A coalesced burst must not resume. Each superseded sibling already
     // resumed this session and appended its own (growing) copy of the
@@ -1167,7 +1309,7 @@ export class SlackHandler {
     // instead: the combined query plus the thread context below carry the full
     // history, so the single reply addresses every folded question.
     if (combinedQuery) {
-      session.sessionId = undefined;
+      this.sessionManager.clearProviderState(session, runtimeProvider);
     }
 
     const threadData = await this.getThreadData(event);
@@ -1178,6 +1320,7 @@ export class SlackHandler {
       processedFiles,
       threadData,
       combinedQuery,
+      runtimeProvider === "openai" ? session.workingDirectory : undefined,
     );
     if (timings) {
       timings.prompt_assembly_ms = Date.now() - promptStart;
@@ -1203,38 +1346,153 @@ export class SlackHandler {
         : undefined,
     };
 
-    // Message triggers in event.text override the channel-level default.
-    const channelMode = await this.channelConfig.getChannelModelOverride(
-      event.channel,
-      event.channel_type,
-    );
-    const requestMode = resolveMode(
-      event.text,
-      channelMode,
-      !!event.explicitMention,
-      MODE_TRIGGER_EMOJIS,
+    const normalizedRequestMode: RequestMode = {
+      ...requestMode,
+      model: effectiveModel,
+    };
+
+    const runtimeTools = await this.buildRuntimeTools(
+      runtimeProvider,
+      slackContext,
+      event,
+      session,
     );
 
-    // Process with Claude via MessageProcessor
-    const claudeStart = Date.now();
-    const result = await this.messageProcessor.processClaudeStream(
-      userPrompt,
-      session,
-      abortController,
-      slackContext,
-      reactionKey,
-      systemPrompt,
-      allowFullLogging,
-      requestMode,
-    );
+    // Process through the provider-neutral runtime registry.
+    const agentStart = Date.now();
+    const processor = this.messageProcessor as MessageProcessor & {
+      processClaudeStream?: MessageProcessor["processClaudeStream"];
+    };
+    const result = this.runtimeRegistry
+      ? await processor.processAgentStream(
+          userPrompt,
+          session,
+          abortController,
+          this.runtimeRegistry.get(runtimeProvider),
+          slackContext,
+          reactionKey,
+          systemPrompt,
+          allowFullLogging,
+          normalizedRequestMode,
+          runtimeTools,
+        )
+      : await processor.processClaudeStream!(
+          userPrompt,
+          session,
+          abortController,
+          slackContext,
+          reactionKey,
+          systemPrompt,
+          allowFullLogging,
+          normalizedRequestMode,
+        );
     if (timings) {
-      timings.claude_total_ms = Date.now() - claudeStart;
+      this.recordAgentTotalTiming(
+        timings,
+        runtimeProvider,
+        Date.now() - agentStart,
+      );
       if (result.phaseTimings) {
         Object.assign(timings, result.phaseTimings);
       }
     }
 
-    return { ...result, requestMode };
+    return { ...result, requestMode: normalizedRequestMode };
+  }
+
+  private resolveEffectiveModel(requestMode: RequestMode): ModelRef {
+    const configured = requestMode.model ?? config.agent.defaultModel;
+    if (typeof configured !== "string") return configured;
+    // The reference may originate from operator-edited channel YAML, which is
+    // not validated on load. Fail open to the deployment default rather than
+    // ending the turn in the generic error path.
+    const parsed = tryParseModelRef(configured);
+    if (parsed) return parsed;
+    this.logger.warn("Ignoring malformed model reference", {
+      model: configured,
+    });
+    return config.agent.defaultModel;
+  }
+
+  private recordAgentTotalTiming(
+    timings: PhaseTimings,
+    provider: AgentProviderId,
+    elapsedMs: number,
+  ): void {
+    timings.agent_total_ms = elapsedMs;
+    if (provider === "anthropic") timings.claude_total_ms = elapsedMs;
+  }
+
+  /** Build request-scoped provider-neutral tools before SDK construction. */
+  private async buildRuntimeTools(
+    provider: AgentProviderId,
+    slackContext: SlackContext,
+    event: MessageEvent,
+    session: Pick<ConversationSession, "workingDirectory">,
+  ): Promise<RuntimeToolBundle> {
+    if (provider !== "openai") return {};
+    const tools: RuntimeToolBundle = {
+      workspaceTools: buildWorkspaceTools(session.workingDirectory),
+      // Deny by default. Every path below either replaces this with a resolved
+      // policy or leaves it in place — the runtime must never be handed a
+      // bundle whose missing policy reads as "no restriction".
+      permissionPolicy: DENY_ALL_TOOL_POLICY,
+    };
+    const injectAllActions =
+      slackContext.channelType === "im" ||
+      !!slackContext.explicitMention ||
+      !!slackContext.workflowId ||
+      !!slackContext.isNonEphemeralConditionalChannel ||
+      !!slackContext.smartReply;
+
+    if (this.customActionRegistry) {
+      const context = {
+        userId:
+          slackContext.user ||
+          slackContext.botId ||
+          slackContext.workflowId ||
+          "slack-workflow",
+        channel: slackContext.channel,
+        channelType: slackContext.channelType,
+        threadTs: slackContext.threadTs,
+        messageTs: slackContext.messageTs || event.ts,
+        messageText: slackContext.messageText,
+        threadUserText: slackContext.threadUserText,
+        workflowId: slackContext.workflowId,
+        botId: slackContext.botId,
+        reactionKey: slackContext.reactionKey,
+        workingDirectory: session.workingDirectory,
+      };
+      tools.actionDefinitions =
+        this.customActionRegistry.getActionToolDefinitions(
+          context,
+          injectAllActions ? undefined : action => action.alwaysInject === true,
+        );
+    }
+
+    if (this.mcpManager) {
+      try {
+        const definitions = this.mcpManager.getServerConfiguration();
+        if (definitions) {
+          const employee = event.user
+            ? await UserUtils.getEmployeeBySlackId(event.user)
+            : undefined;
+          const resolved = await resolveMcpServers(definitions, {
+            email: employee?.email,
+          });
+          tools.mcpDefinitions = resolved;
+        }
+        const role =
+          event.bot_id || event.workflow_id
+            ? (await this.mcpManager.getHighestRole()) || "none"
+            : (await UserUtils.getUserRole(event.user)) || "none";
+        tools.permissionPolicy =
+          await this.mcpManager.getEffectiveToolPolicy(role);
+      } catch (error) {
+        this.logger.warn("Failed to prepare OpenAI MCP tools", { error });
+      }
+    }
+    return tools;
   }
 
   /**
@@ -1253,6 +1511,7 @@ export class SlackHandler {
     processedFiles: ProcessedFile[],
     threadData?: ThreadData,
     combinedQuery?: string,
+    workspaceRootForPrompt?: string,
   ): Promise<{ userPrompt: string; systemPrompt: string }> {
     // Build the system prompt from context files
     const generalContext = await this.channelConfig.getGeneralContextForChannel(
@@ -1325,7 +1584,10 @@ export class SlackHandler {
     // 5. Uploaded files (all files including images)
     // Claude Code will use its Read tool to analyze images directly
     if (processedFiles.length > 0) {
-      const filesContent = this.fileHandler.formatFilesOnly(processedFiles);
+      const filesContent = this.fileHandler.formatFilesOnly(
+        processedFiles,
+        workspaceRootForPrompt,
+      );
       sections.push(`## Uploaded Files:\n${filesContent}`);
     }
 
@@ -1756,7 +2018,11 @@ export class SlackHandler {
           ));
         await this.reactionManager.updateReaction(
           reactionKey,
-          isConditionalSkip ? REACTIONS.SKIPPED : REACTIONS.COMPLETE,
+          result.failed
+            ? REACTIONS.ERROR
+            : isConditionalSkip
+              ? REACTIONS.SKIPPED
+              : REACTIONS.COMPLETE,
         );
       }
     }
@@ -1853,7 +2119,7 @@ export class SlackHandler {
       // An abort almost always means a newer message in the same thread
       // superseded this one (see claimLatestSessionMessage). Mark it skipped
       // rather than errored — the newer message answers the whole thread.
-      const sessionKey = this.claudeHandler.getSessionKey(
+      const sessionKey = this.sessionManager.getSessionKey(
         event.user,
         event.channel,
         event.thread_ts || event.ts,
@@ -1969,7 +2235,7 @@ export class SlackHandler {
 
   /** Compute a message-specific reaction key (does NOT register the message). */
   private getReactionKey(event: MessageEvent): string {
-    const sessionKey = this.claudeHandler.getSessionKey(
+    const sessionKey = this.sessionManager.getSessionKey(
       event.user,
       event.channel,
       event.thread_ts || event.ts,
@@ -2339,7 +2605,7 @@ export class SlackHandler {
     // Cleanup inactive sessions periodically
     setInterval(
       () => {
-        this.claudeHandler.cleanupInactiveSessions();
+        this.sessionManager.cleanupInactiveSessions();
       },
       10 * 60 * 1000,
     );

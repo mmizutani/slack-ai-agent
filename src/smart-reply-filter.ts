@@ -1,7 +1,13 @@
 import { config } from "./config";
-import { buildSanitizedEnv } from "./claude-handler";
 import { HAIKU_MODEL } from "./request-mode";
 import { Logger } from "./logger";
+import type { ModelRef } from "./agent/model";
+import {
+  ProviderTextClassifier,
+  type TextClassifier,
+} from "./agent/text-classifier";
+import { AnthropicTextClassifierBackend } from "./runtimes/anthropic/text-classifier";
+import { OpenAITextClassifierBackend } from "./runtimes/openai/text-classifier";
 
 const logger = new Logger("SmartReplyFilter");
 
@@ -67,72 +73,47 @@ export const parseClassifierDecision = (raw: string | undefined): boolean => {
   return match?.[0] === "YES";
 };
 
-/**
- * Runs the raw one-shot Haiku query and returns its final text. Isolated so the
- * pure prompt/parse helpers stay unit-testable without spawning a subprocess.
- */
-const runClassifierQuery = async (
-  prompt: string,
-  abortController: AbortController,
-): Promise<{ text: string; costUsd?: number }> => {
-  // Mirror ClaudeHandler's dynamic import so the ESM-only SDK isn't turned into
-  // a CommonJS require by the TypeScript compiler.
-  // eslint-disable-next-line @typescript-eslint/ban-ts-comment
-  // @ts-ignore – eval used intentionally to keep dynamic import at runtime
-  const { query: claudeQuery } = await eval(
-    'import("@anthropic-ai/claude-agent-sdk")',
-  );
-
-  const generator = claudeQuery({
-    prompt,
-    abortController,
-    options: {
-      model: HAIKU_MODEL,
-      verbose: false,
-      logLevel: "error",
-      env: buildSanitizedEnv(config.baseDirectory),
-      // No tools, no MCP, no skills — this is a pure text classification.
-      allowedTools: [],
-      settingSources: [],
-      maxTurns: 1,
-      cwd: config.baseDirectory,
-    },
-  });
-
-  let resultText = "";
-  let costUsd: number | undefined;
-  for await (const message of generator as AsyncIterable<any>) {
-    if (message.type === "result") {
-      resultText = message.result || message.message?.result || resultText;
-      // The SDK reports this call's cost on the result message; capture it so
-      // the cheap routing spend is attributable, mirroring the full run.
-      costUsd = message.total_cost_usd ?? costUsd;
-    } else if (message.type === "assistant") {
-      const text = (message.message?.content || [])
-        .filter((part: any) => part.type === "text")
-        .map((part: any) => part.text)
-        .join("");
-      if (text) resultText = text;
-    }
+function configuredClassifierModel(): ModelRef {
+  if (config.smartReplyModel) return config.smartReplyModel;
+  if (config.agent.defaultProvider === "openai") {
+    return {
+      provider: "openai",
+      model: config.openai.model || "gpt-5.6-luna",
+    };
   }
-  return { text: resultText, costUsd };
-};
+  return { provider: "anthropic", model: HAIKU_MODEL };
+}
 
-/** Result of the smart-reply classifier: the decision plus the Claude spend it
- *  incurred (USD), so callers can track the cost even when the answer is NO. */
+/** Build the selected provider's cheap, tools-off classifier lazily. */
+export function createConfiguredTextClassifier(
+  model: ModelRef = configuredClassifierModel(),
+): TextClassifier {
+  return new ProviderTextClassifier(
+    model.provider === "openai"
+      ? new OpenAITextClassifierBackend()
+      : new AnthropicTextClassifierBackend(),
+    model,
+  );
+}
+
+/** Result of the smart-reply classifier: the decision plus provider-reported
+ *  spend (USD), so callers can track the cost even when the answer is NO. */
 export interface SmartReplyClassification {
   couldHelp: boolean;
   costUsd?: number;
 }
 
 /**
- * Layer 2 — cheap Haiku classifier. `couldHelp` is true only when the model
+ * Layer 2 — cheap provider classifier. `couldHelp` is true only when the model
  * judges the message to be something the bot could help with; it fails closed
  * (false) on timeout or error so smart reply never becomes a source of noise.
- * `costUsd` is the classifier's Claude spend, reported regardless of decision.
+ * `costUsd` is the classifier's spend, reported regardless of decision — but
+ * only the backends that report a cost populate it (Anthropic does; the OpenAI
+ * backend returns token usage instead), so treat it as optional.
  */
 export const classifySmartReplyCandidate = async (
   text: string,
+  classifier: TextClassifier = createConfiguredTextClassifier(),
 ): Promise<SmartReplyClassification> => {
   const abortController = new AbortController();
   const timeout = setTimeout(
@@ -140,9 +121,12 @@ export const classifySmartReplyCandidate = async (
     SMART_REPLY_CLASSIFIER_TIMEOUT_MS,
   );
   try {
-    const { text: raw, costUsd } = await runClassifierQuery(
+    // No model is passed: the classifier carries its own provider/model pair.
+    // Supplying the globally configured one here would override an injected
+    // classifier with a model from a different provider.
+    const { text: raw, costUsd } = await classifier.classify(
       buildClassifierPrompt(text),
-      abortController,
+      { signal: abortController.signal },
     );
     const decision = parseClassifierDecision(raw);
     logger.debug("Smart-reply classifier decision", {

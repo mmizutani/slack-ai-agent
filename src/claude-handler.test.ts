@@ -34,6 +34,7 @@ import {
   DEFAULT_SESSION_MAX_AGE_MS,
   shouldInjectActions,
   buildSanitizedEnv,
+  resolveAnthropicModel,
 } from "./claude-handler";
 import { destroyThreadWorkspace, SANDBOX_NETWORK } from "./config";
 
@@ -63,6 +64,21 @@ function createHandler(retryOverrides?: {
 }
 
 describe("ClaudeHandler", () => {
+  it("does not pass an OpenAI ModelRef to the Anthropic SDK", () => {
+    expect(
+      resolveAnthropicModel(
+        { provider: "openai", model: "gpt-5.6-luna" },
+        "claude-opus-5",
+      ),
+    ).toBe("claude-opus-5");
+    expect(
+      resolveAnthropicModel(
+        { provider: "anthropic", model: "claude-haiku-4-5" },
+        "claude-opus-5",
+      ),
+    ).toBe("claude-haiku-4-5");
+  });
+
   describe("getSessionKey", () => {
     let handler: ClaudeHandler;
     beforeEach(() => {
@@ -283,6 +299,90 @@ describe("ClaudeHandler", () => {
       expect(sleepSpy).toHaveBeenCalledTimes(2);
       expect(sleepSpy).toHaveBeenNthCalledWith(1, 10);
       expect(sleepSpy).toHaveBeenNthCalledWith(2, 20);
+    });
+  });
+
+  describe("streamQuery retry safety", () => {
+    it("retries a transient stream failure before any assistant output", async () => {
+      const handler = createHandler({ maxRetries: 1, initialDelayMs: 1 });
+      jest.spyOn(handler as any, "sleep").mockResolvedValue(undefined);
+      const execute = jest.spyOn(handler as any, "executeStreamQueryWithRetry");
+      (execute as any)
+        .mockImplementationOnce(async function* () {
+          yield { type: "system", subtype: "init", session_id: "session-1" };
+          throw new Error("transient stream failure");
+        })
+        .mockImplementationOnce(async function* () {
+          yield { type: "result", subtype: "success", result: "retried" };
+        });
+
+      const messages: unknown[] = [];
+      for await (const message of handler.streamQuery("prompt")) {
+        messages.push(message);
+      }
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(messages).toHaveLength(2);
+    });
+
+    it("does not retry a stream failure after assistant text was streamed", async () => {
+      const handler = createHandler({ maxRetries: 1, initialDelayMs: 1 });
+      jest.spyOn(handler as any, "sleep").mockResolvedValue(undefined);
+      const execute = jest.spyOn(handler as any, "executeStreamQueryWithRetry");
+      (execute as any)
+        .mockImplementationOnce(async function* () {
+          yield {
+            type: "assistant",
+            message: { content: [{ type: "text", text: "before failure" }] },
+          };
+          throw new Error("failure after assistant text");
+        })
+        .mockImplementationOnce(async function* () {
+          yield { type: "result", subtype: "success", result: "retried" };
+        });
+
+      const messages: unknown[] = [];
+      const consume = async () => {
+        for await (const message of handler.streamQuery("prompt")) {
+          messages.push(message);
+        }
+      };
+
+      // A retry here would append a second attempt's text to the same Slack
+      // reply, producing duplicated or contradictory output.
+      await expect(consume()).rejects.toThrow("failure after assistant text");
+      expect(execute).toHaveBeenCalledTimes(1);
+      expect(messages).toHaveLength(1);
+    });
+
+    it("does not retry a stream failure after any tool use", async () => {
+      const handler = createHandler({ maxRetries: 1, initialDelayMs: 1 });
+      jest.spyOn(handler as any, "sleep").mockResolvedValue(undefined);
+      const execute = jest.spyOn(handler as any, "executeStreamQueryWithRetry");
+      (execute as any)
+        .mockImplementationOnce(async function* () {
+          yield {
+            type: "assistant",
+            message: {
+              content: [
+                { type: "tool_use", id: "tool-1", name: "Bash", input: {} },
+              ],
+            },
+          };
+          throw new Error("failure after tool use");
+        })
+        .mockImplementationOnce(async function* () {
+          throw new Error("unexpected retry");
+        });
+
+      const consume = async () => {
+        for await (const _message of handler.streamQuery("prompt")) {
+          // Drain the stream until the failure is observed.
+        }
+      };
+
+      await expect(consume()).rejects.toThrow("failure after tool use");
+      expect(execute).toHaveBeenCalledTimes(1);
     });
   });
 });

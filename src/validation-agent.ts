@@ -9,21 +9,15 @@
  * the bot continues to work normally.
  */
 
-import fs from "fs";
-import path from "path";
-import * as yaml from "js-yaml";
 import { Logger } from "./logger";
+import {
+  loadSubagentDefinitions as loadProviderNeutralDefinitions,
+} from "./subagents/loader";
+import { toClaudeSubagentDefinitions } from "./runtimes/anthropic/subagent-adapter";
 
 const logger = new Logger("SubAgents");
 
-const SUBAGENTS_DIR = path.resolve("config/subagents");
-
-interface SubagentDefinition {
-  name: string;
-  description: string;
-  model: string;
-  prompt: string;
-}
+export { loadProviderNeutralDefinitions as loadProviderNeutralSubagentDefinitions };
 
 /**
  * Load all sub-agent definitions from config/subagents/*.yaml.
@@ -37,50 +31,15 @@ export function loadSubagentDefinitions(
   allowedTools?: string[],
   disallowedTools?: string[],
 ): Record<string, unknown> {
-  if (!fs.existsSync(SUBAGENTS_DIR)) return {};
-
-  const files = fs
-    .readdirSync(SUBAGENTS_DIR)
-    .filter(
-      f =>
-        (f.endsWith(".yaml") || f.endsWith(".yml")) &&
-        !f.startsWith("example-"),
-    );
-
-  const agents: Record<string, unknown> = {};
-
-  for (const file of files) {
-    try {
-      const content = fs.readFileSync(path.join(SUBAGENTS_DIR, file), "utf-8");
-      const def = yaml.load(content) as SubagentDefinition;
-
-      if (!def.name || !def.description || !def.prompt) {
-        logger.warn(
-          `Skipping ${file}: missing required fields (name, description, prompt)`,
-        );
-        continue;
-      }
-
-      const agent: Record<string, unknown> = {
-        description: def.description,
-        prompt: def.prompt,
-        model: def.model || "sonnet",
-      };
-
-      if (allowedTools) {
-        agent.tools = allowedTools;
-      }
-      if (disallowedTools) {
-        agent.disallowedTools = disallowedTools;
-      }
-
-      agents[def.name] = agent;
-
-      logger.info(`Loaded sub-agent: ${def.name} (from ${file})`);
-    } catch (error) {
-      logger.error(`Failed to load sub-agent from ${file}:`, error);
-    }
+  const definitions = loadProviderNeutralDefinitions();
+  const parentTools = allowedTools ?? [];
+  const agents = toClaudeSubagentDefinitions(
+    definitions,
+    parentTools,
+    disallowedTools ?? [],
+  );
+  for (const definition of definitions) {
+    logger.info(`Loaded sub-agent: ${definition.name}`);
   }
-
   return agents;
 }

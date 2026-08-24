@@ -3,6 +3,12 @@ import * as path from "path";
 import { Logger } from "./logger";
 import { CONTEXT_CACHE_TTL_MS } from "./constants";
 import * as yaml from "js-yaml";
+import {
+  computeEffectiveToolPolicy,
+  denyIdentities,
+  isDenied,
+  legacyToolIdentities,
+} from "./mcp/permissions";
 
 /**
  * Tool allowlist loaded from config/tool-allowlist.yaml.
@@ -301,7 +307,27 @@ export class McpManager {
       }
     }
 
-    return tools;
+    // Denylist expansion and the Bash sub-tool rule are shared with
+    // computeEffectiveToolPolicy so the two cannot drift apart.
+    const denied = this.getDisallowedTools().flatMap(denyIdentities);
+    return tools.filter(tool => {
+      const identities = legacyToolIdentities(tool);
+      const comparable = identities.length > 0 ? identities : [tool];
+      // Deliberately stricter than computeEffectiveToolPolicy's allow side,
+      // which narrows Read/Grep/Glob to their Claude-native identity: here a
+      // deny on *either* identity of a legacy alias withdraws the name.
+      return comparable.every(identity => !isDenied(identity, denied));
+    });
+  }
+
+  /** Canonical role policy used by provider adapters. */
+  async getEffectiveToolPolicy(role: string) {
+    const allowlist = await this.loadToolAllowlist();
+    return computeEffectiveToolPolicy(
+      role,
+      allowlist,
+      this.getDisallowedTools(),
+    );
   }
 
   // Retry loading denylist every 30s on error so fixes are picked up quickly

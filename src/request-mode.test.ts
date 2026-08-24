@@ -1,6 +1,44 @@
-import { FABLE_MODEL, HAIKU_MODEL, resolveMode } from "./request-mode";
+import {
+  FABLE_MODEL,
+  HAIKU_MODEL,
+  mergeChannelModeDefaults,
+  resolveMode,
+} from "./request-mode";
+import { parseModelRef } from "./agent/model";
+
+describe("parseModelRef", () => {
+  it.each([
+    ["claude-opus-5", { provider: "anthropic", model: "claude-opus-5" }],
+    [
+      "anthropic/claude-opus-5",
+      { provider: "anthropic", model: "claude-opus-5" },
+    ],
+    ["openai/gpt-5.6-luna", { provider: "openai", model: "gpt-5.6-luna" }],
+  ])("parses %p", (value, expected) => {
+    expect(parseModelRef(value)).toEqual(expected);
+  });
+
+  it("rejects an unknown provider", () => {
+    expect(() => parseModelRef("google/gemini")).toThrow(/invalid model/i);
+  });
+});
 
 describe("resolveMode", () => {
+  it("merges partial channel settings without replacing the default provider", () => {
+    const defaultModel = { provider: "openai" as const, model: "gpt-5.6-luna" };
+
+    expect(mergeChannelModeDefaults({ effort: "max" }, defaultModel)).toEqual({
+      model: defaultModel,
+      effort: "max",
+    });
+    expect(
+      resolveMode(
+        "think fast",
+        mergeChannelModeDefaults({ effort: "max" }, defaultModel),
+      ),
+    ).toEqual({ model: defaultModel, effort: "max" });
+  });
+
   it("returns empty mode for plain text and no channel override", () => {
     expect(resolveMode("hello", undefined)).toEqual({});
     expect(resolveMode(undefined, undefined)).toEqual({});
@@ -121,6 +159,18 @@ describe("resolveMode", () => {
     });
   });
 
+  it("does not let legacy Anthropic trigger aliases switch an OpenAI channel", () => {
+    const openaiModel = { provider: "openai" as const, model: "gpt-5.6-luna" };
+
+    expect(resolveMode("think fast", { model: openaiModel })).toEqual({
+      model: openaiModel,
+    });
+    expect(resolveMode("think harder", { model: openaiModel })).toEqual({
+      model: openaiModel,
+      effort: "max",
+    });
+  });
+
   it("releases a channel Haiku pin when the message asks for max effort", () => {
     expect(resolveMode("think hard", { model: HAIKU_MODEL })).toEqual({
       effort: "max",
@@ -189,6 +239,23 @@ describe("resolveMode", () => {
 
   it("does not activate fast mode via fastModeTagBot without mention", () => {
     expect(resolveMode("hi", { fastModeTagBot: true }, false)).toEqual({});
+  });
+
+  // Channel model strings come from operator-edited YAML. A malformed value
+  // must not throw out of resolveMode and end every message in that channel in
+  // the generic error path — the fastModePattern branch already fails open.
+  it.each(["", "   ", "gemini/pro", "openai/", "anthropic/"])(
+    "fails open on the malformed channel model %p",
+    malformed => {
+      expect(() => resolveMode("hello", { model: malformed })).not.toThrow();
+      expect(resolveMode("hello", { model: malformed })).toEqual({});
+    },
+  );
+
+  it("keeps a message trigger working when the channel model is malformed", () => {
+    expect(resolveMode("think hard", { model: "gemini/pro" })).toEqual({
+      effort: "max",
+    });
   });
 
   it("composes fastModePattern and fastModeTagBot via OR", () => {

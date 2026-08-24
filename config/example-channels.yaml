@@ -23,6 +23,9 @@ channelSettings:
   #   effort: max
   # - channelNamePattern: "^chat-only$"
   #   model: claude-haiku-4-5
+  # OpenAI requests use a qualified model reference:
+  # - channelNamePattern: "^openai-help$"
+  #   model: openai/gpt-5.6-luna
 
 # Channel or DM IDs whose full message + tool-call content is logged even
 # when the conversation is private. Without this, private logs are redacted.

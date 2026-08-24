@@ -15,6 +15,10 @@ jest.mock("./config", () => ({
       signingSecret: "test-secret",
     },
     anthropic: { apiKey: "test-key", model: "claude-opus-5" },
+    agent: {
+      defaultProvider: "anthropic",
+      defaultModel: { provider: "anthropic", model: "claude-opus-5" },
+    },
     slackWorkspaceUrl: "https://test.slack.com",
     baseDirectory: "/tmp/test",
     persistDir: "/tmp/test-persist",
@@ -179,6 +183,254 @@ describe("SlackHandler", () => {
   beforeEach(() => {
     t = createHandler();
     handler = t.handler;
+  });
+
+  it("binds OpenAI workspace tools to the current conversation session", async () => {
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      {
+        channel: "C456",
+        channelType: "channel",
+        user: "U123",
+      },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.workspaceTools).toHaveLength(3);
+    expect((tools.workspaceTools as any[]).map(tool => tool.name)).toEqual([
+      "workspace_read_file",
+      "workspace_list_files",
+      "workspace_search_text",
+    ]);
+  });
+
+  it("passes the conversation workspace to OpenAI custom actions", async () => {
+    const getActionToolDefinitions = jest.fn().mockReturnValue([]);
+    (handler as any).customActionRegistry = { getActionToolDefinitions };
+
+    await priv(handler).buildRuntimeTools(
+      "openai",
+      {
+        channel: "C456",
+        channelType: "channel",
+        user: "U123",
+      },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(getActionToolDefinitions).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workingDirectory: "/tmp/session-workspace",
+      }),
+      expect.any(Function),
+    );
+  });
+
+  it("passes the role policy even when no MCP server is configured", async () => {
+    (handler as any).mcpManager = {
+      getServerConfiguration: jest.fn().mockReturnValue(undefined),
+      getEffectiveToolPolicy: jest.fn().mockResolvedValue({
+        role: "member",
+        allowed: ["workspace/read_file"],
+        denied: [],
+      }),
+      getHighestRole: jest.fn().mockResolvedValue("member"),
+    };
+
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      { channel: "C456", channelType: "channel", user: "U123" },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.permissionPolicy).toEqual(
+      expect.objectContaining({ allowed: ["workspace/read_file"] }),
+    );
+  });
+
+  // The runtime must never receive "no policy" as "no restriction".
+  it("returns a deny-by-default policy when no MCP manager is configured", async () => {
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      { channel: "C456", channelType: "channel", user: "U123" },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.permissionPolicy).toEqual({
+      role: "none",
+      allowed: [],
+      denied: [],
+    });
+  });
+
+  it("keeps the deny-by-default policy when policy preparation throws", async () => {
+    (handler as any).mcpManager = {
+      getServerConfiguration: jest.fn().mockReturnValue(undefined),
+      getHighestRole: jest.fn().mockResolvedValue("member"),
+      getEffectiveToolPolicy: jest
+        .fn()
+        .mockRejectedValue(new Error("allowlist unreadable")),
+    };
+
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      { channel: "C456", channelType: "channel", user: "U123" },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.permissionPolicy).toEqual({
+      role: "none",
+      allowed: [],
+      denied: [],
+    });
+  });
+
+  it("selects the runtime from a qualified channel model and strips its prefix", () => {
+    expect(
+      priv(handler).resolveEffectiveModel({ model: "openai/gpt-5.6-luna" }),
+    ).toEqual({ provider: "openai", model: "gpt-5.6-luna" });
+  });
+
+  // Operator-edited channel YAML is never validated on load, so a malformed
+  // reference must fall back to the deployment default instead of throwing out
+  // of the turn.
+  it.each(["gemini/pro", "openai/", ""])(
+    "falls back to the default model for the malformed model reference %p",
+    malformed => {
+      expect(() =>
+        priv(handler).resolveEffectiveModel({ model: malformed }),
+      ).not.toThrow();
+      expect(priv(handler).resolveEffectiveModel({ model: malformed })).toEqual(
+        {
+          provider: "anthropic",
+          model: "claude-opus-5",
+        },
+      );
+    },
+  );
+
+  // SlackHandler falls back to this shim when the session owner exposes no
+  // SessionManager. A coalesced burst on one provider clears that provider's
+  // continuation state, and must not discard the other provider's.
+  describe("legacy session-manager shim", () => {
+    const makeSession = () =>
+      ({
+        sessionId: "claude-session",
+        providerState: {
+          anthropic: { provider: "anthropic", sessionId: "claude-session" },
+          openai: {
+            provider: "openai",
+            mode: "previous_response_id",
+            previousResponseId: "resp-1",
+          },
+        },
+      }) as any;
+
+    it("clears only the named provider's state", () => {
+      const session = makeSession();
+
+      priv(handler).sessionManager.clearProviderState(session, "openai");
+
+      expect(session.providerState.openai).toBeUndefined();
+      expect(session.providerState.anthropic).toEqual({
+        provider: "anthropic",
+        sessionId: "claude-session",
+      });
+      expect(session.sessionId).toBe("claude-session");
+    });
+
+    it("clears the Claude session id alongside the anthropic provider", () => {
+      const session = makeSession();
+
+      priv(handler).sessionManager.clearProviderState(session, "anthropic");
+
+      expect(session.providerState.anthropic).toBeUndefined();
+      expect(session.providerState.openai).toBeDefined();
+      expect(session.sessionId).toBeUndefined();
+    });
+
+    // A legacy session owner predates providerState. Every consumer indexes
+    // into it unguarded, so the shim has to establish the invariant its
+    // ConversationSession type already promises.
+    it("gives a legacy session a providerState object", () => {
+      t.claudeHandler.createSession.mockReturnValue({
+        workingDirectory: "/tmp/work",
+      });
+      t.claudeHandler.getSession.mockReturnValue({
+        workingDirectory: "/tmp/work",
+      });
+
+      expect(
+        priv(handler).sessionManager.createSession("U1", "C1", "1.1")
+          .providerState,
+      ).toEqual({});
+      expect(
+        priv(handler).sessionManager.getSession("U1", "C1", "1.1")
+          .providerState,
+      ).toEqual({});
+    });
+
+    it("leaves an existing providerState untouched", () => {
+      const providerState = {
+        openai: {
+          provider: "openai",
+          mode: "previous_response_id",
+          previousResponseId: "resp-1",
+        },
+      };
+      t.claudeHandler.getSession.mockReturnValue({
+        workingDirectory: "/tmp/work",
+        providerState,
+      });
+
+      expect(
+        priv(handler).sessionManager.getSession("U1", "C1", "1.1")
+          .providerState,
+      ).toBe(providerState);
+    });
+
+    it("clears every provider when none is named", () => {
+      const session = makeSession();
+
+      priv(handler).sessionManager.clearProviderState(session);
+
+      expect(session.providerState).toEqual({});
+      expect(session.sessionId).toBeUndefined();
+    });
+  });
+
+  // cleanupInactiveSessions evicts on lastActivity, which createSession stamps
+  // once. Without a refresh an active thread loses its workspace and provider
+  // continuation state as soon as it outlives the max age from creation.
+  it("refreshes lastActivity when an existing session is reused", async () => {
+    const session = {
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(0),
+    };
+    t.claudeHandler.getSession.mockReturnValue(session);
+
+    await priv(handler).getOrCreateSession(makeEvent());
+
+    expect(session.lastActivity.getTime()).toBeGreaterThan(0);
+  });
+
+  it("records provider-neutral total timing and Claude compatibility timing only for Anthropic", () => {
+    const openaiTimings: Record<string, number> = {};
+    priv(handler).recordAgentTotalTiming(openaiTimings, "openai", 12);
+    expect(openaiTimings).toEqual({ agent_total_ms: 12 });
+
+    const anthropicTimings: Record<string, number> = {};
+    priv(handler).recordAgentTotalTiming(anthropicTimings, "anthropic", 15);
+    expect(anthropicTimings).toEqual({
+      agent_total_ms: 15,
+      claude_total_ms: 15,
+    });
   });
 
   describe("containsSpecialMarkers", () => {
@@ -1066,6 +1318,45 @@ describe("SlackHandler", () => {
       );
     });
 
+    it("shows ERROR reaction when the runtime reports a failed terminal", async () => {
+      t.channelConfig.isConditionalReplyChannel = jest
+        .fn()
+        .mockResolvedValue(false);
+      const event = makeEvent();
+      const result = {
+        messages: [
+          "❌ Something went wrong while processing your request. Please try again.",
+        ],
+        shouldNotRespond: false,
+        failed: true,
+      };
+
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+
+      expect(t.reactionManager.updateReaction).toHaveBeenCalledWith(
+        expect.any(String),
+        "x", // REACTIONS.ERROR
+      );
+      expect(t.reactionManager.updateReaction).not.toHaveBeenCalledWith(
+        expect.any(String),
+        "white_check_mark",
+      );
+    });
+
+    it("leaves a posted action confirmation reaction under registry ownership after failure", async () => {
+      const event = makeEvent();
+      const result = {
+        messages: [],
+        shouldNotRespond: true,
+        confirmationDialogPosted: true,
+        failed: true,
+      };
+
+      await priv(handler).sendResponse(event, result, mockSay, Date.now());
+
+      expect(t.reactionManager.updateReaction).not.toHaveBeenCalled();
+    });
+
     it("tracks message processed with agentCouldHelp false on DO_NOT_RESPOND", async () => {
       const event = makeEvent();
       const result = {
@@ -1284,7 +1575,7 @@ describe("SlackHandler", () => {
       t.claudeHandler.getSession = jest.fn().mockReturnValue(undefined);
       t.claudeHandler.createSession = jest
         .fn()
-        .mockReturnValue({ workingDirectory: "/tmp/work" });
+        .mockReturnValue({ workingDirectory: "/tmp/work", providerState: {} });
 
       processClaudeStream = jest.fn().mockResolvedValue({
         messages: ["Here is your answer."],
@@ -1348,7 +1639,7 @@ describe("SlackHandler", () => {
       t.claudeHandler.getSession = jest.fn().mockReturnValue(undefined);
       t.claudeHandler.createSession = jest
         .fn()
-        .mockReturnValue({ workingDirectory: "/tmp/work" });
+        .mockReturnValue({ workingDirectory: "/tmp/work", providerState: {} });
 
       processClaudeStream = jest.fn();
       priv(handler).messageProcessor.processClaudeStream = processClaudeStream;
@@ -1426,9 +1717,13 @@ describe("SlackHandler", () => {
 
     it("answers the coalesced burst on a fresh session instead of resuming the superseded turns", async () => {
       // A prior exchange in this thread left a resumable session id.
-      t.claudeHandler.createSession = jest
-        .fn()
-        .mockReturnValue({ workingDirectory: "/tmp/work", sessionId: "prior" });
+      t.claudeHandler.createSession = jest.fn().mockReturnValue({
+        workingDirectory: "/tmp/work",
+        sessionId: "prior",
+        providerState: {
+          anthropic: { provider: "anthropic", sessionId: "prior" },
+        },
+      });
 
       let markStreamStarted: () => void;
       const streamStarted = new Promise<void>(resolve => {

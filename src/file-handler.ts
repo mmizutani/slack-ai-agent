@@ -2,6 +2,7 @@ import * as fs from "fs";
 import * as path from "path";
 import { Logger } from "./logger";
 import { config } from "./config";
+import { resolveWorkspacePath, workspaceRelativePath } from "./workspace/path-policy";
 export interface ProcessedFile {
   path: string;
   name: string;
@@ -156,23 +157,42 @@ export class FileHandler {
   }
 
   /**
-   * Format files into a prompt string for Claude
-   * All files are passed by path - Claude Code will use its Read tool to access content
+   * Format files into a prompt string for the active agent runtime.
+   * All files are passed by path so an authorized workspace-reading tool can
+   * access their bounded contents.
    * @param files - Array of processed files to format
    * @returns Formatted string with file information
    */
-  formatFilesOnly(files: ProcessedFile[]): string {
+  formatFilesOnly(files: ProcessedFile[], workspaceRoot?: string): string {
     if (files.length === 0) {
       return "";
     }
 
-    const parts: string[] = files.map(
-      file =>
-        `- **${file.name}** (${file.mimetype}, ${file.size} bytes): \`${file.path}\``,
-    );
+    const parts: string[] = files.map(file => {
+      let advertisedPath = file.path;
+      if (workspaceRoot) {
+        try {
+          const root = fs.realpathSync.native(workspaceRoot);
+          const absolute = fs.realpathSync.native(file.path);
+          const relative = path.relative(root, absolute);
+          if (
+            relative === "" ||
+            relative.startsWith("..") ||
+            path.isAbsolute(relative)
+          ) {
+            throw new Error("file is outside the conversation workspace");
+          }
+          const resolved = resolveWorkspacePath(workspaceRoot, relative);
+          advertisedPath = workspaceRelativePath(workspaceRoot, resolved);
+        } catch {
+          advertisedPath = "[unavailable outside conversation workspace]";
+        }
+      }
+      return `- **${file.name}** (${file.mimetype}, ${file.size} bytes): \`${advertisedPath}\``;
+    });
 
     return (
-      "The following files have been uploaded. Use the Read tool to access their contents:\n" +
+      "The following files are available in this conversation workspace. Use an available workspace-reading tool when you need their contents:\n" +
       parts.join("\n")
     );
   }

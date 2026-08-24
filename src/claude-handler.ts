@@ -1,12 +1,9 @@
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import path from "path";
 import { ConversationSession, SlackContext } from "./types";
 import { Logger } from "./logger";
 import { bindUserToMcpServers, McpManager } from "./mcp-manager";
 import {
   config,
-  provisionThreadWorkspace,
-  destroyThreadWorkspace,
   buildSandboxFilesystem,
   getCloudSdkConfig,
   SANDBOX_NETWORK,
@@ -14,11 +11,23 @@ import {
 import { UserUtils } from "./user-utils";
 import { loadSubagentDefinitions } from "./validation-agent";
 import type { CustomActionRegistry } from "./custom-actions";
+import { buildClaudeActionMcpServers } from "./runtimes/anthropic/action-adapter";
 import { OPUS_MODEL, RequestMode, SONNET_MODEL } from "./request-mode";
 import { OpusHealthMonitor } from "./opus-health";
+import {
+  DEFAULT_SESSION_MAX_AGE_MS,
+  SessionManager,
+} from "./sessions/session-manager";
 
-/** Default max age for inactive session cleanup (16 hours). */
-export const DEFAULT_SESSION_MAX_AGE_MS = 16 * 60 * 60 * 1000;
+export { DEFAULT_SESSION_MAX_AGE_MS } from "./sessions/session-manager";
+
+export function resolveAnthropicModel(
+  requested: RequestMode["model"],
+  fallback: string,
+): string {
+  if (typeof requested === "string") return requested;
+  return requested?.provider === "anthropic" ? requested.model : fallback;
+}
 
 const ALLOWED_ENV_VARS = new Set([
   "PATH",
@@ -120,12 +129,59 @@ interface RetryOptions {
   backoffMultiplier: number;
 }
 
+/** Treat any raw SDK tool signal as a point of no safe whole-turn retry. */
+function containsToolUse(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const value = message as any;
+  if (
+    value.type === "tool_use" ||
+    value.type === "tool_result" ||
+    typeof value.tool_use_id === "string" ||
+    typeof value.toolUseId === "string"
+  ) {
+    return true;
+  }
+  const content = [value.message?.content, value.content].find(Array.isArray);
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block: any) =>
+        block?.type === "tool_use" ||
+        block?.type === "tool_result" ||
+        typeof block?.tool_use_id === "string" ||
+        typeof block?.toolUseId === "string",
+    )
+  );
+}
+
+/**
+ * True once a message carries assistant-authored text. Such text is already
+ * accumulated into the reply by MessageProcessor, so a retry after this point
+ * would concatenate a second attempt's answer onto the first.
+ */
+function containsAssistantText(message: unknown): boolean {
+  if (!message || typeof message !== "object") return false;
+  const value = message as any;
+  if (value.type !== "assistant") return false;
+  const content = value.message?.content ?? value.content;
+  if (typeof content === "string") return content.trim().length > 0;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block: any) =>
+        block?.type === "text" &&
+        typeof block.text === "string" &&
+        block.text.trim().length > 0,
+    )
+  );
+}
+
 export class ClaudeHandler {
-  private sessions: Map<string, ConversationSession> = new Map();
   private logger = new Logger("ClaudeHandler");
   private mcpManager: McpManager;
   private customActionRegistry?: CustomActionRegistry;
   private opusHealthMonitor: OpusHealthMonitor;
+  private sessionManager: SessionManager;
   private retryOptions: RetryOptions = {
     maxRetries: 3, // Reduced retry attempts for faster failure detection
     initialDelayMs: 2000, // 2 seconds - more time for process cleanup
@@ -136,14 +192,16 @@ export class ClaudeHandler {
     mcpManager: McpManager,
     customActionRegistry?: CustomActionRegistry,
     opusHealthMonitor: OpusHealthMonitor = new OpusHealthMonitor(),
+    sessionManager: SessionManager = new SessionManager(),
   ) {
     this.mcpManager = mcpManager;
     this.customActionRegistry = customActionRegistry;
     this.opusHealthMonitor = opusHealthMonitor;
+    this.sessionManager = sessionManager;
   }
 
   getSessionKey(userId: string, channelId: string, threadTs?: string): string {
-    return `${userId}-${channelId}-${threadTs || "direct"}`;
+    return this.sessionManager.getSessionKey(userId, channelId, threadTs);
   }
 
   getSession(
@@ -151,7 +209,7 @@ export class ClaudeHandler {
     channelId: string,
     threadTs?: string,
   ): ConversationSession | undefined {
-    return this.sessions.get(this.getSessionKey(userId, channelId, threadTs));
+    return this.sessionManager.getSession(userId, channelId, threadTs);
   }
 
   createSession(
@@ -159,17 +217,12 @@ export class ClaudeHandler {
     channelId: string,
     threadTs?: string,
   ): ConversationSession {
-    const sessionKey = this.getSessionKey(userId, channelId, threadTs);
-    const workingDirectory = provisionThreadWorkspace(sessionKey);
-    const session: ConversationSession = {
-      userId,
-      channelId,
-      threadTs,
-      workingDirectory,
-      lastActivity: new Date(),
-    };
-    this.sessions.set(sessionKey, session);
-    return session;
+    return this.sessionManager.createSession(userId, channelId, threadTs);
+  }
+
+  /** Shared session owner used by Slack orchestration during migration. */
+  getSessionManager(): SessionManager {
+    return this.sessionManager;
   }
 
   private async sleep(ms: number): Promise<void> {
@@ -209,14 +262,16 @@ export class ClaudeHandler {
     onRetry?: (attempt: number) => void,
     systemPrompt?: string,
     requestMode?: RequestMode,
-  ): AsyncGenerator<SDKMessage, void, unknown> {
+  ): AsyncGenerator<unknown, void, unknown> {
     for (
       let globalAttempt = 0;
       globalAttempt <= this.retryOptions.maxRetries;
       globalAttempt++
     ) {
+      let toolUseObserved = false;
+      let assistantOutputObserved = false;
       try {
-        yield* await this.executeStreamQueryWithRetry(
+        for await (const message of await this.executeStreamQueryWithRetry(
           prompt,
           session,
           abortController,
@@ -224,10 +279,18 @@ export class ClaudeHandler {
           onRetry,
           systemPrompt,
           requestMode,
-        );
+        )) {
+          toolUseObserved ||= containsToolUse(message);
+          assistantOutputObserved ||= containsAssistantText(message);
+          yield message;
+        }
         return;
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
+        // A retry replays the original prompt. Anything already exposed to the
+        // consumer stays in the reply, so retrying after a side effect or after
+        // assistant text would duplicate or contradict what the user already saw.
+        if (toolUseObserved || assistantOutputObserved) throw error;
         if (globalAttempt === this.retryOptions.maxRetries) throw error;
 
         // Clear session ID to force fresh session on retry
@@ -235,7 +298,7 @@ export class ClaudeHandler {
           this.logger.info("Clearing session ID for fresh retry", {
             sessionId: session.sessionId,
           });
-          session.sessionId = undefined;
+          this.sessionManager.clearProviderState(session, "anthropic");
         }
 
         const delay =
@@ -265,17 +328,20 @@ export class ClaudeHandler {
     onRetry?: (attempt: number) => void,
     systemPrompt?: string,
     requestMode?: RequestMode,
-  ): AsyncGenerator<SDKMessage, void, unknown> {
+  ): AsyncGenerator<unknown, void, unknown> {
     // resolveMode has already reconciled model/effort compatibility, so the
     // SDK options can take the values verbatim with a default-model fallback.
     if (requestMode?.model || requestMode?.effort || requestMode?.fast) {
       this.logger.info("Applying request-mode override", { ...requestMode });
     }
 
-    // Configure the Claude SDK options. We no longer bypass the built-in
+    // Configure the Anthropic SDK options. We no longer bypass the built-in
     // permission checks because we want our `allowedTools` list (defined
     // below) to be fully enforced by the runtime.
-    const primaryModel = requestMode?.model || config.anthropic.model;
+    const primaryModel = resolveAnthropicModel(
+      requestMode?.model,
+      config.anthropic.model,
+    );
     const cwd = session?.workingDirectory ?? config.baseDirectory;
     const options: any = {
       outputFormat: "stream-json",
@@ -395,13 +461,15 @@ export class ClaudeHandler {
         };
 
         const injectAllActions = shouldInjectActions(slackContext);
-        const customActionServers =
-          await this.customActionRegistry.createMcpServerConfig(
+        const actionDefinitions =
+          this.customActionRegistry.getActionToolDefinitions(
             actionSlackCtx,
             injectAllActions
               ? undefined
               : action => action.alwaysInject === true,
           );
+        const customActionServers =
+          await buildClaudeActionMcpServers(actionDefinitions);
         options.mcpServers = {
           ...(options.mcpServers || {}),
           ...customActionServers,
@@ -478,8 +546,13 @@ export class ClaudeHandler {
       },
     };
 
-    if (session?.sessionId) {
-      options.resume = session.sessionId;
+    const anthropicState = session?.providerState.anthropic;
+    const resumeSessionId =
+      anthropicState?.provider === "anthropic"
+        ? anthropicState.sessionId
+        : session?.sessionId;
+    if (resumeSessionId) {
+      options.resume = resumeSessionId;
     }
 
     // Create a generator with simple retry logic
@@ -516,6 +589,10 @@ export class ClaudeHandler {
         if (message.type === "system" && message.subtype === "init") {
           if (session) {
             session.sessionId = message.session_id;
+            this.sessionManager.setProviderState(session, {
+              provider: "anthropic",
+              sessionId: message.session_id,
+            });
           }
         }
         if (
@@ -557,12 +634,6 @@ export class ClaudeHandler {
   }
 
   cleanupInactiveSessions(maxAge: number = DEFAULT_SESSION_MAX_AGE_MS) {
-    const now = Date.now();
-    for (const [key, session] of this.sessions.entries()) {
-      if (now - session.lastActivity.getTime() > maxAge) {
-        this.sessions.delete(key);
-        destroyThreadWorkspace(key);
-      }
-    }
+    this.sessionManager.cleanupInactiveSessions(maxAge);
   }
 }

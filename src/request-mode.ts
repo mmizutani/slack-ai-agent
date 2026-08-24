@@ -1,4 +1,8 @@
-export type EffortLevel = "low" | "medium" | "high" | "xhigh" | "max";
+import { EffortLevel, ModelRef, tryParseModelRef } from "./agent/model";
+import { getAnthropicModelCapabilities } from "./runtimes/anthropic/model-capabilities";
+import { getOpenAIModelCapabilities } from "./runtimes/openai/model-capabilities";
+
+export type { EffortLevel } from "./agent/model";
 
 export type AllowedModel =
   | "claude-opus-5"
@@ -6,19 +10,28 @@ export type AllowedModel =
   | "claude-haiku-4-5"
   | "claude-fable-5";
 
+export type ModelSetting = AllowedModel | string | ModelRef;
+
 export interface RequestMode {
-  model?: AllowedModel;
+  model?: ModelSetting;
   effort?: EffortLevel;
   fast?: boolean;
 }
 
 export interface ChannelModeConfig {
-  model?: AllowedModel;
+  model?: ModelSetting;
   effort?: EffortLevel;
   /** Regex tested against message text; fast mode activates on match. Use ".*" for always-on. */
   fastModePattern?: string;
   /** Fast mode activates when the user @-mentions the bot. */
   fastModeTagBot?: boolean;
+}
+
+export function mergeChannelModeDefaults(
+  channelMode: ChannelModeConfig | undefined,
+  defaultModel: ModelSetting,
+): ChannelModeConfig {
+  return { model: defaultModel, ...channelMode };
 }
 
 export const OPUS_MODEL: AllowedModel = "claude-opus-5";
@@ -68,13 +81,23 @@ const MODE_TIERS: {
   },
 ];
 
-const supportsEffort = (model: string | undefined): boolean =>
-  !model?.toLowerCase().includes("haiku");
+const getCapabilities = (model: ModelSetting | undefined) => {
+  if (!model) return getAnthropicModelCapabilities();
+  const modelRef =
+    typeof model === "string" ? tryParseModelRef(model) : (model as ModelRef);
+  if (!modelRef) return getAnthropicModelCapabilities();
+  return modelRef.provider === "openai"
+    ? getOpenAIModelCapabilities(modelRef)
+    : getAnthropicModelCapabilities(modelRef);
+};
 
-// Fast mode is Opus-only. `undefined` means the default model (Opus), so it
-// qualifies; any explicitly pinned non-Opus model does not.
-const supportsFastMode = (model: string | undefined): boolean =>
-  model === undefined || model.toLowerCase().includes("opus");
+const supportsEffort = (
+  model: ModelSetting | undefined,
+  effort: EffortLevel,
+): boolean => getCapabilities(model).reasoningEfforts.has(effort);
+
+const supportsFastMode = (model: ModelSetting | undefined): boolean =>
+  getCapabilities(model).supportsFastMode;
 
 export const resolveMode = (
   text: string | undefined,
@@ -92,7 +115,28 @@ export const resolveMode = (
     );
   });
 
-  let model = matched?.mode.model ?? channelMode?.model;
+  // Channel model strings come from operator-edited YAML and are never
+  // validated on load. Drop an unparseable value and fall back to the
+  // deployment default, matching how the fastModePattern branch below fails
+  // open — otherwise one bad channel entry sends every message in that channel
+  // to the generic error path.
+  const configuredModel = channelMode?.model;
+  const channelModel =
+    typeof configuredModel === "string" && !tryParseModelRef(configuredModel)
+      ? undefined
+      : configuredModel;
+  const channelProvider =
+    typeof channelModel === "string"
+      ? tryParseModelRef(channelModel)?.provider
+      : channelModel?.provider;
+  const matchedModel = matched?.mode.model;
+  // Phrase/emoji tiers predate provider routing and their unqualified model
+  // aliases are Anthropic-specific. Preserve an explicitly selected OpenAI
+  // model instead of silently switching paid providers.
+  let model =
+    channelProvider === "openai" && typeof matchedModel === "string"
+      ? channelModel
+      : (matchedModel ?? channelModel);
   let effort = matched?.mode.effort ?? channelMode?.effort;
   // Either condition independently enables fast mode (OR, not AND).
   let patternMatch = false;
@@ -109,10 +153,15 @@ export const resolveMode = (
 
   // When a trigger only sets effort (no model), release a channel Haiku pin
   // so the effort can actually take effect.
-  if (matched && !matched.mode.model && effort && !supportsEffort(model)) {
+  if (
+    matched &&
+    !matched.mode.model &&
+    effort &&
+    !supportsEffort(model, effort)
+  ) {
     model = undefined;
   }
-  if (!supportsEffort(model)) effort = undefined;
+  if (effort && !supportsEffort(model, effort)) effort = undefined;
   if (!supportsFastMode(model)) fast = false;
 
   return {

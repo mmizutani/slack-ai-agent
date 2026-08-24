@@ -25,7 +25,13 @@ interface ReactionConfig {
 }
 
 function loadReactionConfig(): ReactionConfig {
-  const configPath = path.resolve("config/emojis.yaml");
+  const configuredPath = path.resolve("config/emojis.yaml");
+  // A checkout may intentionally omit deployment-local config (the example
+  // file is the tracked template). Keep tests and local startup usable with
+  // deterministic defaults while still preferring the operator's config.
+  const configPath = fs.existsSync(configuredPath)
+    ? configuredPath
+    : path.resolve("config/example-emojis.yaml");
   const content = fs.readFileSync(configPath, "utf-8");
   const config = yaml.load(content) as ReactionConfig;
   logger.info("Loaded emoji config");

@@ -12,6 +12,7 @@ jest.mock("./config", () => ({
 
 // Mock fs/yaml so loadConfig doesn't try to read real files
 jest.mock("fs", () => ({
+  existsSync: jest.fn().mockReturnValue(true),
   readFileSync: jest.fn().mockReturnValue(
     JSON.stringify({
       channelSettings: [],
@@ -31,6 +32,7 @@ jest.mock("js-yaml", () => ({
 }));
 
 import { load } from "js-yaml";
+import * as fs from "fs";
 import { ChannelConfigManager } from "./channel-config";
 import { SlackChannelType } from "./types";
 
@@ -41,6 +43,8 @@ describe("ChannelConfigManager", () => {
   let mockApp: any;
 
   beforeEach(() => {
+    (fs.existsSync as jest.Mock).mockReturnValue(true);
+    (fs.readFileSync as jest.Mock).mockClear();
     manager = new ChannelConfigManager();
     mockApp = {
       client: {
@@ -50,6 +54,46 @@ describe("ChannelConfigManager", () => {
       },
     };
     manager.setApp(mockApp);
+  });
+
+  it("warns with the missing configured path before using the example config", async () => {
+    (fs.existsSync as jest.Mock).mockReturnValue(false);
+    const fallbackManager = new ChannelConfigManager();
+    const warn = jest.spyOn((fallbackManager as any).logger, "warn");
+
+    await fallbackManager.isSmartReplyEligibleChannelName("general", "channel");
+
+    expect(fs.readFileSync).toHaveBeenCalledWith(
+      expect.stringMatching(/config\/example-channels\.yaml$/),
+      "utf-8",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "Configured channel config is missing; using example config",
+      expect.objectContaining({
+        configuredPath: expect.stringMatching(/config\/channels\.yaml$/),
+      }),
+    );
+  });
+
+  it("warns with the missing context path before using example context", async () => {
+    (fs.existsSync as jest.Mock).mockReturnValue(false);
+    const fallbackManager = new ChannelConfigManager();
+    const warn = jest.spyOn((fallbackManager as any).logger, "warn");
+
+    await fallbackManager.getGeneralContext();
+
+    expect(fs.readFileSync).toHaveBeenCalledWith(
+      expect.stringMatching(/config\/instructions\/example-general-context\.txt$/),
+      "utf-8",
+    );
+    expect(warn).toHaveBeenCalledWith(
+      "Configured general context is missing; using example context",
+      expect.objectContaining({
+        configuredPath: expect.stringMatching(
+          /config\/instructions\/general-context\.txt$/,
+        ),
+      }),
+    );
   });
 
   describe("getChannelName", () => {
