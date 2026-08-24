@@ -4,5 +4,8 @@
     "types": ["jest", "node"],
     "noEmit": true
   },
+  // Test-only sources are excluded from the production build; ts-jest still
+  // needs them in the type-check program.
+  "exclude": ["node_modules", "dist"],
   "include": ["src/**/*.ts", "config/**/*.ts"]
 }

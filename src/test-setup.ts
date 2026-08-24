@@ -1,13 +1,17 @@
-// Provide dummy values for required env vars so config.ts loads without
-// throwing — tests should never depend on real credentials.
-process.env.CC_SLACK_BOT_TOKEN ??= "xoxb-test";
-process.env.CC_SLACK_APP_TOKEN ??= "xapp-test";
-process.env.CC_SLACK_SIGNING_SECRET ??= "test-signing-secret";
-process.env.ANTHROPIC_API_KEY ??= "sk-ant-test";
-process.env.SLACK_WORKSPACE_URL ??= "https://test.slack.com";
+// Jest `setupFiles` entry: runs in every worker before the test framework and
+// before any application module — including `config.ts` and its
+// `dotenv.config()` call — is loaded. See `./test-support/offline-guard` for
+// why each measure is needed.
+import {
+  installOfflineGuard,
+  scrubProviderCredentials,
+} from "./test-support/offline-guard";
 
-// Silence console output during tests to keep output clean.
-// This runs as a setupFile (before test framework), so we patch directly.
+scrubProviderCredentials(process.env);
+installOfflineGuard();
+
+// Silence console output during tests to keep output clean. This runs as a
+// setupFile (before the test framework), so we patch directly.
 console.log = () => {};
 console.warn = () => {};
 console.error = () => {};
