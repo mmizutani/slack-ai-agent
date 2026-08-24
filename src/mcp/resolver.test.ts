@@ -1,3 +1,4 @@
+import { Logger } from "../logger";
 import { resolveMcpServers } from "./resolver";
 
 describe("resolveMcpServers", () => {
@@ -90,13 +91,15 @@ describe("resolveMcpServers", () => {
       undefined,
     );
 
-    expect(resolved).toEqual([{
-      name: "legacy",
-      transport: "sse",
-      url: "https://legacy.example/mcp",
-      headers: { Authorization: "Bearer dynamic" },
-      legacy: true,
-    }]);
+    expect(resolved).toEqual([
+      {
+        name: "legacy",
+        transport: "sse",
+        url: "https://legacy.example/mcp",
+        headers: { Authorization: "Bearer dynamic" },
+        legacy: true,
+      },
+    ]);
   });
 
   it("does not expose application provider credentials to headers helpers", async () => {
@@ -108,16 +111,17 @@ describe("resolveMcpServers", () => {
           safe: {
             type: "http",
             url: "https://safe.example/mcp",
-            headersHelper:
-              `printf '{"Inherited":"%s"}' "\${SLACK_AI_AGENT_SECRET_SENTINEL-unset}"`,
+            headersHelper: `printf '{"Inherited":"%s"}' "\${SLACK_AI_AGENT_SECRET_SENTINEL-unset}"`,
           },
         },
         undefined,
       );
 
-      expect(resolved[0]).toEqual(expect.objectContaining({
-        headers: { Inherited: "unset" },
-      }));
+      expect(resolved[0]).toEqual(
+        expect.objectContaining({
+          headers: { Inherited: "unset" },
+        }),
+      );
     } finally {
       if (original === undefined) {
         delete process.env.SLACK_AI_AGENT_SECRET_SENTINEL;
@@ -144,5 +148,61 @@ describe("resolveMcpServers", () => {
     );
 
     expect(resolved.map(server => server.name)).toEqual(["plain"]);
+  });
+
+  it("names the failing server in the log without leaking header values", async () => {
+    const warn = jest
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      await resolveMcpServers(
+        {
+          broken: {
+            type: "http",
+            url: "https://broken.example/mcp",
+            headersHelper: "printf '%s' '{\"Authorization\":1}'",
+          },
+        },
+        undefined,
+      );
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("headers helper"),
+        expect.objectContaining({ server: "broken" }),
+      );
+      const logged = JSON.stringify(warn.mock.calls);
+      expect(logged).not.toContain("Authorization");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it("resolves headers helpers concurrently rather than one at a time", async () => {
+    let active = 0;
+    let peak = 0;
+    const helper = async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise(resolve => setTimeout(resolve, 20));
+      active -= 1;
+      return { Authorization: "Bearer token" };
+    };
+    const definitions = Object.fromEntries(
+      ["a", "b", "c"].map(name => [
+        name,
+        {
+          type: "http" as const,
+          url: `https://${name}.example/mcp`,
+          headersHelper: `helper-${name}`,
+        },
+      ]),
+    );
+
+    const resolved = await resolveMcpServers(definitions, undefined, {
+      resolveHeaders: helper,
+    });
+
+    expect(resolved.map(server => server.name)).toEqual(["a", "b", "c"]);
+    expect(peak).toBe(3);
   });
 });
