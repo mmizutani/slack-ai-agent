@@ -48,7 +48,7 @@ export class AnthropicTextClassifierBackend implements TextClassifierBackend {
         prompt: input,
         abortController,
         options: {
-          model: options.model.model || HAIKU_MODEL,
+          model: options.model?.model || HAIKU_MODEL,
           verbose: false,
           logLevel: "error",
           env: buildSanitizedEnv(config.baseDirectory),

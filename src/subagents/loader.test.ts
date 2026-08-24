@@ -1,6 +1,7 @@
 import fs from "fs";
 import os from "os";
 import path from "path";
+import { Logger } from "../logger";
 import { intersectSubagentTools, loadSubagentDefinitions } from "./loader";
 
 describe("provider-neutral subagent loader", () => {
@@ -60,6 +61,43 @@ describe("provider-neutral subagent loader", () => {
     );
 
     expect(loadSubagentDefinitions(directory)[0].tools).toEqual([]);
+  });
+
+  // A silently dropped file looks identical to one that was never written.
+  it("names the skipped files and reports considered versus loaded", () => {
+    const warn = jest
+      .spyOn(Logger.prototype, "warn")
+      .mockImplementation(() => undefined);
+    try {
+      const directory = fs.mkdtempSync(path.join(os.tmpdir(), "subagents-"));
+      fs.writeFileSync(
+        path.join(directory, "good.yaml"),
+        ["name: good", "description: Fine", "instructions: Do it", ""].join(
+          "\n",
+        ),
+      );
+      fs.writeFileSync(
+        path.join(directory, "incomplete.yaml"),
+        "name: missing-fields\n",
+      );
+      fs.writeFileSync(
+        path.join(directory, "broken.yaml"),
+        "name: [unclosed\n",
+      );
+
+      expect(loadSubagentDefinitions(directory)).toHaveLength(1);
+
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("Skipped"),
+        expect.objectContaining({ considered: 3, loaded: 1 }),
+      );
+      const { skipped } = warn.mock.calls[0][1] as { skipped: string[] };
+      expect(skipped).toHaveLength(2);
+      expect(skipped.join(" ")).toContain("incomplete.yaml");
+      expect(skipped.join(" ")).toContain("broken.yaml");
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

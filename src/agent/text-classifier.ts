@@ -2,7 +2,12 @@ import type { AgentUsage } from "./events";
 import type { ModelRef } from "./model";
 
 export interface TextClassifierRequest {
-  model: ModelRef;
+  /**
+   * Optional override. The classifier normally carries its own provider/model
+   * pair, so a caller supplying one here can only introduce a mismatch with
+   * the backend it was handed.
+   */
+  model?: ModelRef;
   signal: AbortSignal;
 }
 
@@ -33,7 +38,10 @@ export class ProviderTextClassifier implements TextClassifier {
     private readonly model?: ModelRef,
   ) {}
 
-  classify(input: string, options: TextClassifierRequest): Promise<TextClassifierResult> {
+  classify(
+    input: string,
+    options: TextClassifierRequest,
+  ): Promise<TextClassifierResult> {
     return this.backend.classify(input, {
       ...options,
       ...(this.model ? { model: this.model } : {}),

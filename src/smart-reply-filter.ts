@@ -107,7 +107,9 @@ export interface SmartReplyClassification {
  * Layer 2 — cheap provider classifier. `couldHelp` is true only when the model
  * judges the message to be something the bot could help with; it fails closed
  * (false) on timeout or error so smart reply never becomes a source of noise.
- * `costUsd` is the classifier's Claude spend, reported regardless of decision.
+ * `costUsd` is the classifier's spend, reported regardless of decision — but
+ * only the backends that report a cost populate it (Anthropic does; the OpenAI
+ * backend returns token usage instead), so treat it as optional.
  */
 export const classifySmartReplyCandidate = async (
   text: string,
@@ -119,10 +121,12 @@ export const classifySmartReplyCandidate = async (
     SMART_REPLY_CLASSIFIER_TIMEOUT_MS,
   );
   try {
-    const model = configuredClassifierModel();
+    // No model is passed: the classifier carries its own provider/model pair.
+    // Supplying the globally configured one here would override an injected
+    // classifier with a model from a different provider.
     const { text: raw, costUsd } = await classifier.classify(
       buildClassifierPrompt(text),
-      { model, signal: abortController.signal },
+      { signal: abortController.signal },
     );
     const decision = parseClassifierDecision(raw);
     logger.debug("Smart-reply classifier decision", {

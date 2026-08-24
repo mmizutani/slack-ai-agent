@@ -1,10 +1,13 @@
 import fs from "fs";
 import path from "path";
 import * as yaml from "js-yaml";
+import { Logger } from "../logger";
 import { parseModelRef } from "../agent/model";
 import type { AgentProviderId } from "../types";
 import { legacyToolIdentities } from "../mcp/permissions";
 import type { SubagentDefinition } from "./types";
+
+const logger = new Logger("SubagentLoader");
 
 const MODEL_ALIASES: Record<string, string> = {
   haiku: "anthropic/claude-haiku-4-5",
@@ -87,6 +90,7 @@ export function loadSubagentDefinitions(
   }
 
   const definitions: SubagentDefinition[] = [];
+  const skipped: string[] = [];
   for (const file of files) {
     try {
       const parsed = yaml.load(
@@ -94,9 +98,23 @@ export function loadSubagentDefinitions(
       );
       const definition = parseDefinition(parsed);
       if (definition) definitions.push(definition);
-    } catch {
-      // Optional configuration is fail-closed per file.
+      // parseDefinition returns undefined only when name, description or
+      // instructions is missing or not a string.
+      else skipped.push(`${file} (missing name, description or instructions)`);
+    } catch (error) {
+      // Optional configuration is fail-closed per file, but a file that is
+      // silently dropped looks identical to one that was never written.
+      skipped.push(
+        `${file} (${error instanceof Error ? error.message : String(error)})`,
+      );
     }
+  }
+  if (skipped.length > 0) {
+    logger.warn("Skipped invalid sub-agent definition files", {
+      considered: files.length,
+      loaded: definitions.length,
+      skipped,
+    });
   }
   return definitions;
 }

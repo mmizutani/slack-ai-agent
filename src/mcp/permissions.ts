@@ -23,21 +23,30 @@ export function legacyToolIdentities(value: string): string[] {
   if (value.startsWith("Bash(")) {
     return [`provider_native:anthropic/${value}`];
   }
-  if (/^(Task|Skill|Write|Edit|WebSearch|WebFetch|ReadMcpResource|ListMcpResources|Bash|ExitPlanMode|TodoWrite|BashOutput)$/.test(value)) {
+  if (
+    /^(Task|Skill|Write|Edit|WebSearch|WebFetch|ReadMcpResource|ListMcpResources|Bash|ExitPlanMode|TodoWrite|BashOutput)$/.test(
+      value,
+    )
+  ) {
     return [`provider_native:anthropic/${value}`];
   }
-  if (/^(mcp|workspace|action)[:/]/.test(value) || value.startsWith("provider_native:")) {
+  if (
+    /^(mcp|workspace|action)[:/]/.test(value) ||
+    value.startsWith("provider_native:")
+  ) {
     return [value];
   }
   return [];
 }
 
-function denyIdentities(value: string): string[] {
+/** Expand a denylist entry to the identities it blocks. */
+export function denyIdentities(value: string): string[] {
   const identities = legacyToolIdentities(value);
   return identities.length > 0 ? identities : [value];
 }
 
-function isDenied(identity: string, denied: readonly string[]): boolean {
+/** True when an identity is blocked, including Bash sub-tools under a Bash deny. */
+export function isDenied(identity: string, denied: readonly string[]): boolean {
   if (denied.includes(identity)) return true;
   return (
     identity.startsWith("provider_native:anthropic/Bash(") &&
@@ -48,7 +57,10 @@ function isDenied(identity: string, denied: readonly string[]): boolean {
 function policyIdentities(value: string): string[] {
   // Legacy Read/Grep/Glob only grant their provider-native Claude tools by
   // default. OpenAI workspace aliases must be explicitly configured.
-  return legacyToolIdentities(value).slice(0, value === "Read" || value === "Grep" || value === "Glob" ? 1 : undefined);
+  return legacyToolIdentities(value).slice(
+    0,
+    value === "Read" || value === "Grep" || value === "Glob" ? 1 : undefined,
+  );
 }
 
 export function toolIdentity(value: string): ToolIdentity | undefined {

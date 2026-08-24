@@ -42,7 +42,7 @@ export class OpenAITextClassifierBackend implements TextClassifierBackend {
       name: "slack-smart-reply-classifier",
       instructions:
         "Classify the input according to the caller's instructions and return only the requested answer.",
-      model: options.model.model,
+      model: options.model?.model || config.openai.model,
       // The Agent stores Responses when this is omitted, which would retain
       // classifier transcripts in a deployment that opted out.
       modelSettings: { store: this.storeResponses },

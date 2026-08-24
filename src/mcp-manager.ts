@@ -3,7 +3,12 @@ import * as path from "path";
 import { Logger } from "./logger";
 import { CONTEXT_CACHE_TTL_MS } from "./constants";
 import * as yaml from "js-yaml";
-import { computeEffectiveToolPolicy, legacyToolIdentities } from "./mcp/permissions";
+import {
+  computeEffectiveToolPolicy,
+  denyIdentities,
+  isDenied,
+  legacyToolIdentities,
+} from "./mcp/permissions";
 
 /**
  * Tool allowlist loaded from config/tool-allowlist.yaml.
@@ -302,22 +307,16 @@ export class McpManager {
       }
     }
 
-    const denied = new Set(
-      this.getDisallowedTools().flatMap(tool => {
-        const identities = legacyToolIdentities(tool);
-        return identities.length > 0 ? identities : [tool];
-      }),
-    );
+    // Denylist expansion and the Bash sub-tool rule are shared with
+    // computeEffectiveToolPolicy so the two cannot drift apart.
+    const denied = this.getDisallowedTools().flatMap(denyIdentities);
     return tools.filter(tool => {
       const identities = legacyToolIdentities(tool);
       const comparable = identities.length > 0 ? identities : [tool];
-      return comparable.every(identity =>
-        !denied.has(identity) &&
-        !(
-          identity.startsWith("provider_native:anthropic/Bash(") &&
-          denied.has("provider_native:anthropic/Bash")
-        ),
-      );
+      // Deliberately stricter than computeEffectiveToolPolicy's allow side,
+      // which narrows Read/Grep/Glob to their Claude-native identity: here a
+      // deny on *either* identity of a legacy alias withdraws the name.
+      return comparable.every(identity => !isDenied(identity, denied));
     });
   }
 

@@ -143,8 +143,27 @@ describe("provider-neutral classifier", () => {
       expect.objectContaining({
         tools: [],
         continuation: false,
-        model: expect.anything(),
         signal: expect.any(AbortSignal),
+      }),
+    );
+    // The call site must not supply a model: an injected classifier carries its
+    // own provider/model pair, and overriding it can cross providers.
+    expect(classify.mock.calls[0][1]).not.toHaveProperty("model");
+  });
+
+  it("lets an injected classifier keep its own model instead of the configured one", async () => {
+    const classify = jest.fn().mockResolvedValue({ text: "YES" });
+    const classifier = new ProviderTextClassifier(
+      { classify } satisfies TextClassifierBackend,
+      { provider: "anthropic", model: "claude-haiku-4-5" },
+    );
+
+    await classifySmartReplyCandidate("can you investigate this?", classifier);
+
+    expect(classify).toHaveBeenCalledWith(
+      expect.any(String),
+      expect.objectContaining({
+        model: { provider: "anthropic", model: "claude-haiku-4-5" },
       }),
     );
   });
