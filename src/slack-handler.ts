@@ -89,9 +89,26 @@ interface SessionOwner {
   cleanupInactiveSessions(maxAge?: number): void;
 }
 
+/**
+ * The SessionManager surface this class depends on. Typing the field against it
+ * means a newly used SessionManager method has to be listed here, which in turn
+ * forces the legacy shim below to implement it. The previous
+ * `as unknown as SessionManager` cast let a missing or mismatched method
+ * through to run time.
+ */
+type SlackSessionManager = Pick<
+  SessionManager,
+  | "getSessionKey"
+  | "getSession"
+  | "createSession"
+  | "cleanupInactiveSessions"
+  | "clearProviderState"
+  | "activateProvider"
+>;
+
 export class SlackHandler {
   private app: App;
-  private sessionManager: SessionManager;
+  private sessionManager: SlackSessionManager;
   private runtimeRegistry?: AgentRuntimeRegistry;
   private customActionRegistry?: CustomActionRegistry;
   private mcpManager?: McpManager;
@@ -155,12 +172,22 @@ export class SlackHandler {
         cleanupInactiveSessions: (
           ...args: Parameters<SessionOwner["cleanupInactiveSessions"]>
         ) => (legacySessionOwner.cleanupInactiveSessions as any)(...args),
-        touchSession: (session: ConversationSession) => {
-          session.lastActivity = new Date();
-        },
-        clearProviderState: (session: ConversationSession) => {
-          session.sessionId = undefined;
+        // Provider-scoped, matching SessionManager.clearProviderState: a
+        // coalesced burst on one provider must not discard the other
+        // provider's continuation state.
+        clearProviderState: (
+          session: ConversationSession,
+          provider?: AgentProviderId,
+        ) => {
+          if (provider) {
+            // A legacy session owner predates providerState and may hand back
+            // a session without it.
+            if (session.providerState) delete session.providerState[provider];
+            if (provider === "anthropic") session.sessionId = undefined;
+            return;
+          }
           session.providerState = {};
+          session.sessionId = undefined;
         },
         activateProvider: (
           session: ConversationSession,
@@ -176,7 +203,7 @@ export class SlackHandler {
           session.activeProvider = provider;
           return changed;
         },
-      } as unknown as SessionManager);
+      } satisfies SlackSessionManager);
     this.runtimeRegistry = runtimeRegistry;
     this.customActionRegistry = customActionRegistry;
     this.mcpManager = mcpManager;

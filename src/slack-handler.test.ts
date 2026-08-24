@@ -275,6 +275,56 @@ describe("SlackHandler", () => {
     },
   );
 
+  // SlackHandler falls back to this shim when the session owner exposes no
+  // SessionManager. A coalesced burst on one provider clears that provider's
+  // continuation state, and must not discard the other provider's.
+  describe("legacy session-manager shim", () => {
+    const makeSession = () =>
+      ({
+        sessionId: "claude-session",
+        providerState: {
+          anthropic: { provider: "anthropic", sessionId: "claude-session" },
+          openai: {
+            provider: "openai",
+            mode: "previous_response_id",
+            previousResponseId: "resp-1",
+          },
+        },
+      }) as any;
+
+    it("clears only the named provider's state", () => {
+      const session = makeSession();
+
+      priv(handler).sessionManager.clearProviderState(session, "openai");
+
+      expect(session.providerState.openai).toBeUndefined();
+      expect(session.providerState.anthropic).toEqual({
+        provider: "anthropic",
+        sessionId: "claude-session",
+      });
+      expect(session.sessionId).toBe("claude-session");
+    });
+
+    it("clears the Claude session id alongside the anthropic provider", () => {
+      const session = makeSession();
+
+      priv(handler).sessionManager.clearProviderState(session, "anthropic");
+
+      expect(session.providerState.anthropic).toBeUndefined();
+      expect(session.providerState.openai).toBeDefined();
+      expect(session.sessionId).toBeUndefined();
+    });
+
+    it("clears every provider when none is named", () => {
+      const session = makeSession();
+
+      priv(handler).sessionManager.clearProviderState(session);
+
+      expect(session.providerState).toEqual({});
+      expect(session.sessionId).toBeUndefined();
+    });
+  });
+
   it("records provider-neutral total timing and Claude compatibility timing only for Anthropic", () => {
     const openaiTimings: Record<string, number> = {};
     priv(handler).recordAgentTotalTiming(openaiTimings, "openai", 12);
@@ -1430,7 +1480,7 @@ describe("SlackHandler", () => {
       t.claudeHandler.getSession = jest.fn().mockReturnValue(undefined);
       t.claudeHandler.createSession = jest
         .fn()
-        .mockReturnValue({ workingDirectory: "/tmp/work" });
+        .mockReturnValue({ workingDirectory: "/tmp/work", providerState: {} });
 
       processClaudeStream = jest.fn().mockResolvedValue({
         messages: ["Here is your answer."],
@@ -1494,7 +1544,7 @@ describe("SlackHandler", () => {
       t.claudeHandler.getSession = jest.fn().mockReturnValue(undefined);
       t.claudeHandler.createSession = jest
         .fn()
-        .mockReturnValue({ workingDirectory: "/tmp/work" });
+        .mockReturnValue({ workingDirectory: "/tmp/work", providerState: {} });
 
       processClaudeStream = jest.fn();
       priv(handler).messageProcessor.processClaudeStream = processClaudeStream;
@@ -1572,9 +1622,13 @@ describe("SlackHandler", () => {
 
     it("answers the coalesced burst on a fresh session instead of resuming the superseded turns", async () => {
       // A prior exchange in this thread left a resumable session id.
-      t.claudeHandler.createSession = jest
-        .fn()
-        .mockReturnValue({ workingDirectory: "/tmp/work", sessionId: "prior" });
+      t.claudeHandler.createSession = jest.fn().mockReturnValue({
+        workingDirectory: "/tmp/work",
+        sessionId: "prior",
+        providerState: {
+          anthropic: { provider: "anthropic", sessionId: "prior" },
+        },
+      });
 
       let markStreamStarted: () => void;
       const streamStarted = new Promise<void>(resolve => {
