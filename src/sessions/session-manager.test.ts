@@ -16,13 +16,14 @@ describe("SessionManager", () => {
   it("keys sessions deterministically and keeps provider state separate", () => {
     const manager = new SessionManager();
 
-    expect(manager.getSessionKey("U1", "C2", "111.222")).toBe(
-      "U1-C2-111.222",
-    );
+    expect(manager.getSessionKey("U1", "C2", "111.222")).toBe("U1-C2-111.222");
     expect(manager.getSessionKey("U1", "C2")).toBe("U1-C2-direct");
 
     const session = manager.createSession("U1", "C2", "111.222");
-    session.providerState.anthropic = { provider: "anthropic", sessionId: "a1" };
+    session.providerState.anthropic = {
+      provider: "anthropic",
+      sessionId: "a1",
+    };
     session.providerState.openai = {
       provider: "openai",
       mode: "previous_response_id",
@@ -44,6 +45,25 @@ describe("SessionManager", () => {
 
     expect(manager.getSession("U1", "C2", "111.222")).toBeUndefined();
     expect(destroyThreadWorkspace).toHaveBeenCalledWith("U1-C2-111.222");
+  });
+
+  // The sweep runs from a setInterval callback, so an escaping exception would
+  // both abandon the remaining sessions and go unhandled.
+  it("keeps sweeping when one workspace fails to be destroyed", () => {
+    const destroyWorkspace = jest.fn((key: string) => {
+      if (key === "U1-C2-bad") throw new Error("EBUSY");
+    });
+    const manager = new SessionManager({ destroyWorkspace });
+    for (const threadTs of ["good-1", "bad", "good-2"]) {
+      manager.createSession("U1", "C2", threadTs).lastActivity = new Date(0);
+    }
+
+    expect(() => manager.cleanupInactiveSessions(1)).not.toThrow();
+
+    expect(destroyWorkspace).toHaveBeenCalledTimes(3);
+    for (const threadTs of ["good-1", "bad", "good-2"]) {
+      expect(manager.getSession("U1", "C2", threadTs)).toBeUndefined();
+    }
   });
 
   it("clears incompatible continuation state when the provider changes", () => {

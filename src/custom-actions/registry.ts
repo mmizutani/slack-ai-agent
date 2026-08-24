@@ -99,11 +99,22 @@ export class CustomActionRegistry {
       inputSchema: action.inputSchema,
       requiresApproval: action.requiresApproval !== false,
       invoke: async (args: unknown): Promise<ActionToolResult> => {
-        const result = await this.handleToolCall(
-          action.name,
-          args,
-          slackContext,
-        );
+        // Provider adapters await this inside an SDK tool callback, where a
+        // rejection is handled provider-specifically and skips the structured
+        // shape every runtime's event adapter expects. Confirmation failures
+        // (runConfirmationStep, pendingSessions.set) reach here as throws.
+        let result: Awaited<ReturnType<typeof this.handleToolCall>>;
+        try {
+          result = await this.handleToolCall(action.name, args, slackContext);
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : String(error);
+          this.logger.error("Action tool invocation failed", {
+            name: action.name,
+            message,
+          });
+          return { text: `Error in ${action.name}: ${message}`, isError: true };
+        }
         const text = result.content
           .filter(item => item.type === "text")
           .map(item => item.text)
@@ -130,7 +141,10 @@ export class CustomActionRegistry {
     filter?: (action: CustomAction<any>) => boolean,
   ): Promise<Record<string, ActionToolDefinition[]>> {
     const grouped: Record<string, ActionToolDefinition[]> = {};
-    for (const definition of this.getActionToolDefinitions(slackContext, filter)) {
+    for (const definition of this.getActionToolDefinitions(
+      slackContext,
+      filter,
+    )) {
       const server = definition.identity.server ?? "custom-actions";
       (grouped[server] ??= []).push(definition);
     }

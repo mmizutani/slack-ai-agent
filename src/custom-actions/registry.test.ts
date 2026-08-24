@@ -271,6 +271,39 @@ describe("CustomActionRegistry reaction lifecycle", () => {
     );
   });
 
+  // The provider adapters await this handler inside an SDK tool callback. A
+  // rejection there is provider-specific and skips the structured shape every
+  // runtime's event adapter expects.
+  it("returns a structured error result when the confirmation flow throws", async () => {
+    registry.register(makeAction());
+    app.client.chat.postMessage.mockRejectedValue(new Error("slack down"));
+
+    const [definition] = registry.getActionToolDefinitions(makeCtx());
+    const result = await definition.invoke({});
+
+    expect(result).toEqual({
+      text: expect.stringContaining("slack down"),
+      isError: true,
+    });
+    expect(reactionManager.updateReaction).toHaveBeenCalledWith(
+      REACTION_KEY,
+      REACTIONS.ERROR,
+    );
+  });
+
+  it("maps a successful confirmation into the structured lifecycle flags", async () => {
+    registry.register(makeAction());
+
+    const [definition] = registry.getActionToolDefinitions(makeCtx());
+    const result = await definition.invoke({});
+
+    expect(result).toEqual({
+      text: expect.stringContaining("confirmation dialog has been posted"),
+      suppressReply: true,
+      confirmationDialogPosted: true,
+    });
+  });
+
   it("invokes immediately when requiresApproval is false", async () => {
     const action = makeAction({
       requiresApproval: false,

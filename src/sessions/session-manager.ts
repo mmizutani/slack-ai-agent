@@ -1,7 +1,4 @@
-import {
-  destroyThreadWorkspace,
-  provisionThreadWorkspace,
-} from "../config";
+import { destroyThreadWorkspace, provisionThreadWorkspace } from "../config";
 import {
   AgentProviderId,
   ConversationSession,
@@ -101,14 +98,18 @@ export class SessionManager {
     return changed;
   }
 
-  cleanupInactiveSessions(
-    maxAge: number = DEFAULT_SESSION_MAX_AGE_MS,
-  ): void {
+  cleanupInactiveSessions(maxAge: number = DEFAULT_SESSION_MAX_AGE_MS): void {
     const now = this.now().getTime();
     for (const [key, session] of this.sessions.entries()) {
       if (now - session.lastActivity.getTime() > maxAge) {
         this.sessions.delete(key);
-        this.destroyWorkspace(key);
+        try {
+          this.destroyWorkspace(key);
+        } catch {
+          // The sweep runs from a setInterval callback: one workspace that
+          // cannot be removed must not abandon the remaining sessions or
+          // escape as an unhandled exception.
+        }
       }
     }
   }
