@@ -52,13 +52,24 @@ export class SessionManager {
     threadTs?: string,
   ): ConversationSession {
     const sessionKey = this.getSessionKey(userId, channelId, threadTs);
-    this.resolvePendingWorkspace(sessionKey);
+    // Session keys are deterministic and the workspace path derives from the
+    // key, so the directory about to be provisioned is the same one a failed
+    // cleanup may still be holding. Try once more to clear it out.
+    if (this.pendingWorkspaceCleanup.has(sessionKey)) {
+      this.destroyWorkspaceOnce(sessionKey);
+    }
+    const workingDirectory = this.provisionWorkspace(sessionKey);
+    // Only now does the path belong to a live conversation, so only now is it
+    // safe to stop sweeping it — even if the destroy above failed. Until this
+    // line the key stays queued, so a provisioning failure still leaves a
+    // handle on the old directory for a later sweep to retry.
+    this.pendingWorkspaceCleanup.delete(sessionKey);
     const session: ConversationSession = {
       userId,
       channelId,
       threadTs,
       providerState: {},
-      workingDirectory: this.provisionWorkspace(sessionKey),
+      workingDirectory,
       lastActivity: this.now(),
     };
     this.sessions.set(sessionKey, session);
@@ -116,21 +127,6 @@ export class SessionManager {
         this.destroyWorkspaceOnce(key);
       }
     }
-  }
-
-  /**
-   * Settle a queued cleanup before its path is handed to a new session.
-   *
-   * Session keys are deterministic and the workspace path derives from the key,
-   * so recreating a thread's session reuses the exact directory a failed
-   * cleanup left queued. Try once more to clear it out, then drop the key
-   * regardless: the path now belongs to a live conversation, and a sweep that
-   * still held the key would delete that conversation's workspace.
-   */
-  private resolvePendingWorkspace(sessionKey: string): void {
-    if (!this.pendingWorkspaceCleanup.has(sessionKey)) return;
-    this.destroyWorkspaceOnce(sessionKey);
-    this.pendingWorkspaceCleanup.delete(sessionKey);
   }
 
   /**

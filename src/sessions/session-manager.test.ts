@@ -112,6 +112,42 @@ describe("SessionManager", () => {
     expect(manager.getSession("U1", "C2", "111.222")).toBe(recreated);
   });
 
+  // Dropping the retry key before the replacement workspace exists orphans the
+  // old directory: createSession leaves without storing a session, so no later
+  // sweep has anything to retry from.
+  it("keeps the cleanup retry when provisioning the replacement fails", () => {
+    let provisionFails = false;
+    let destroyFails = true;
+    const provisionWorkspace = jest.fn((key: string) => {
+      if (provisionFails) throw new Error("ENOSPC");
+      return `/tmp/${key}`;
+    });
+    const destroyWorkspace = jest.fn(() => {
+      if (destroyFails) throw new Error("EBUSY");
+    });
+    const manager = new SessionManager({
+      provisionWorkspace,
+      destroyWorkspace,
+    });
+    manager.createSession("U1", "C2", "111.222").lastActivity = new Date(0);
+
+    manager.cleanupInactiveSessions(1);
+    expect(destroyWorkspace).toHaveBeenCalledTimes(1);
+
+    provisionFails = true;
+    expect(() => manager.createSession("U1", "C2", "111.222")).toThrow(
+      "ENOSPC",
+    );
+    expect(manager.getSession("U1", "C2", "111.222")).toBeUndefined();
+
+    // The old workspace is still on disk and still the queue's responsibility.
+    destroyFails = false;
+    destroyWorkspace.mockClear();
+    manager.cleanupInactiveSessions(1);
+
+    expect(destroyWorkspace).toHaveBeenCalledWith("U1-C2-111.222");
+  });
+
   it("clears incompatible continuation state when the provider changes", () => {
     const manager = new SessionManager();
     const session = manager.createSession("U1", "C2", "111.222");
