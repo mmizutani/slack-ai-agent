@@ -1205,10 +1205,13 @@ Preferred interface:
 
 ```ts
 export interface TextClassifier {
-  classify(input: string, options: {
-    model: ModelRef;
-    signal: AbortSignal;
-  }): Promise<{
+  classify(
+    input: string,
+    options: {
+      model: ModelRef;
+      signal: AbortSignal;
+    },
+  ): Promise<{
     text: string;
     usage?: AgentUsage;
     costUsd?: number;
@@ -1833,9 +1836,7 @@ const agent = new Agent({
   instructions: request.systemPrompt,
   model: request.model.model,
   modelSettings: {
-    ...(request.effort
-      ? { reasoning: { effort: request.effort } }
-      : {}),
+    ...(request.effort ? { reasoning: { effort: request.effort } } : {}),
     store: config.openai.storeResponses,
   },
   tools: openaiTools,
@@ -1852,7 +1853,7 @@ const stream = await runner.run(agent, request.prompt, {
 
 try {
   for await (const event of stream) {
-    yield* adaptOpenAIEvent(event, request);
+    yield * adaptOpenAIEvent(event, request);
   }
 } finally {
   await stream.completed;

@@ -45,12 +45,14 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 1: Restore the test harness and extract provider-neutral sessions
 
 **Files:**
+
 - Create: `tsconfig.test.json`
 - Create: `src/sessions/session-manager.ts`
 - Create: `src/sessions/session-manager.test.ts`
 - Modify: `src/types.ts`, `src/config.ts`, `src/claude-handler.ts`, `src/claude-handler.test.ts`, `src/slack-handler.ts`, `src/slack-handler.test.ts`
 
 **Interfaces:**
+
 - Produces `ConversationSession.providerState: Partial<Record<AgentProviderId, ProviderSessionState>>`.
 - Produces `SessionManager.getSessionKey/getSession/createSession/cleanupInactiveSessions`.
 
@@ -62,12 +64,14 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 2: Add runtime contracts and adapt Claude events
 
 **Files:**
+
 - Create: `src/agent/events.ts`, `src/agent/runtime.ts`, `src/agent/model.ts`, `src/agent/errors.ts`
 - Create: `src/runtimes/registry.ts`, `src/runtimes/anthropic/runtime.ts`, `src/runtimes/anthropic/event-adapter.ts`
 - Create: matching `*.test.ts` files
 - Modify: `src/message-processor.ts`, `src/slack-handler.ts`, `src/claude-handler.ts`, affected tests
 
 **Interfaces:**
+
 - `AgentRuntime.stream(request: AgentRunRequest): AsyncIterable<AgentEvent>`.
 - `AgentEvent` is the discriminated union from spec section 7.5 and emits exactly one terminal outcome.
 - `AgentRuntimeRegistry.get(provider)` fails clearly for disabled runtimes.
@@ -80,10 +84,12 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 3: Generalize models, request modes, and provider-aware startup
 
 **Files:**
+
 - Modify: `src/agent/model.ts`, `src/config.ts`, `src/config.test.ts`, `src/request-mode.ts`, `src/request-mode.test.ts`, `src/channel-config.ts`, `src/channel-config.test.ts`, `src/index.ts`
 - Create: `src/runtimes/anthropic/model-capabilities.ts`, `src/runtimes/openai/model-capabilities.ts`
 
 **Interfaces:**
+
 - `ModelRef { provider: "anthropic" | "openai"; model: string }` and `parseModelRef` preserve legacy Claude aliases.
 - `config.agent.defaultProvider/defaultModel`, optional provider configs, and `validateEnabledProviders()`.
 
@@ -95,12 +101,14 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 4: Canonicalize MCP definitions and tool authorization
 
 **Files:**
+
 - Create: `src/mcp/types.ts`, `src/mcp/resolver.ts`, `src/mcp/permissions.ts`
 - Create: `src/runtimes/anthropic/mcp-adapter.ts`
 - Create: matching test files
 - Modify: `src/mcp-manager.ts`, `src/mcp-manager.test.ts`, allow/deny examples, Claude runtime
 
 **Interfaces:**
+
 - `ToolIdentity`, `McpServerDefinition`, `ResolvedMcpServerDefinition`, `resolveMcpServers`, `computeEffectiveToolPolicy` match spec sections 11-12.
 - Legacy `mcp__server__tool`, `Read`, `Grep`, `Glob`, and `Bash(...)` translation remains supported; Bash never maps to OpenAI shell.
 
@@ -111,11 +119,13 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 5: Extract provider-neutral custom actions and subagents
 
 **Files:**
+
 - Create: `src/custom-actions/tool-definitions.ts`, `src/subagents/types.ts`, `src/subagents/loader.ts`
 - Create: `src/runtimes/anthropic/action-adapter.ts`, `src/runtimes/anthropic/subagent-adapter.ts`
 - Modify: `src/custom-actions/registry.ts`, `src/custom-actions/types.ts`, `src/validation-agent.ts`, affected tests
 
 **Interfaces:**
+
 - `ActionToolDefinition` and structured `ActionToolResult` carry `suppressReply` and `confirmationDialogPosted`.
 - `SubagentDefinition` uses provider-neutral instructions/model/tools/maxTurns; effective tools are parent intersection requested.
 
@@ -126,12 +136,14 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 6: Implement the OpenAI text runtime
 
 **Files:**
+
 - Modify: `package.json`, `pnpm-lock.yaml`
 - Create: `src/runtimes/openai/provider.ts`, `src/runtimes/openai/runtime.ts`, `src/runtimes/openai/event-adapter.ts`
 - Create: matching unit tests and captured/synthetic fixtures
 - Modify: `src/runtimes/registry.ts`, `src/index.ts`, telemetry types/call sites
 
 **Interfaces:**
+
 - A reusable OpenAI provider/Runner is configured from `OPENAI_API_KEY`, optional `OPENAI_BASE_URL`, store/session/tracing settings.
 - Runtime maps streaming text, usage, `previousResponseId`, cancellation, and max-turn outcomes into `AgentEvent` and awaits stream settlement with bounded cleanup.
 
@@ -143,10 +155,12 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 7: Add OpenAI MCP and custom-action tools with safe retries
 
 **Files:**
+
 - Create: `src/runtimes/openai/mcp-adapter.ts`, `src/runtimes/openai/action-adapter.ts`, matching tests
 - Modify: OpenAI runtime, shared error/retry policy, runtime contract tests
 
 **Interfaces:**
+
 - stdio and Streamable HTTP map to current SDK MCP classes; unsupported legacy SSE fails with a configuration error.
 - SDK `toolFilter` enforces canonical policy. Request-scoped MCP objects close after runs.
 - Full-run retries stop after any side-effecting tool call.
@@ -158,11 +172,13 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 8: Add safe workspace tools and provider-neutral smart reply
 
 **Files:**
+
 - Create: `src/workspace/manager.ts`, `src/workspace/path-policy.ts`, `src/workspace/tools.ts`, matching tests
 - Create: `src/agent/text-classifier.ts`
 - Modify: `src/config.ts`, `src/file-handler.ts`, `src/smart-reply-filter.ts`, affected tests and OpenAI tool construction
 
 **Interfaces:**
+
 - Read/list/search tools operate only under the current real workspace root with bounded input/output.
 - `TextClassifier.classify(input, { model, signal })` supports Anthropic or OpenAI without tools/session continuation.
 
@@ -174,11 +190,13 @@ external MCP end-to-end verification remain deployment-environment gates.
 ### Task 9: Add OpenAI subagents, migration docs, and live smoke gates
 
 **Files:**
+
 - Create: `src/runtimes/openai/subagent-adapter.ts`, matching tests
 - Create: `scripts/openai-smoke.ts`
 - Modify: `README.md`, `.env.example`, `config/example-channels.yaml`, tool allow/deny examples, `package.json`
 
 **Interfaces:**
+
 - OpenAI subagents are manager-style agents-as-tools and cannot exceed parent policy.
 - Smoke script supports text-only and deterministic function-tool modes, emits no secrets, and is excluded from normal CI.
 
