@@ -21,11 +21,37 @@ function blockText(value: unknown): string {
   if (Array.isArray(value)) {
     return value
       .map(item =>
-        typeof item === "string" ? item : (item as any)?.text ?? JSON.stringify(item),
+        typeof item === "string"
+          ? item
+          : ((item as any)?.text ?? JSON.stringify(item)),
       )
       .join("");
   }
   return JSON.stringify(value ?? "");
+}
+
+/**
+ * Lifecycle flags set by the in-process custom-action MCP server (see
+ * action-adapter). The SDK exposes the tool's full Output object on the user
+ * message as `tool_use_result` — the nested `tool_result` block carries only
+ * the model-visible text, so `structuredContent` never appears there.
+ */
+function lifecycleFlags(toolUseResult: unknown): {
+  suppressReply?: boolean;
+  confirmationDialogPosted?: boolean;
+} {
+  if (!toolUseResult || typeof toolUseResult !== "object") return {};
+  const value = toolUseResult as Record<string, unknown>;
+  const structured =
+    value.structuredContent && typeof value.structuredContent === "object"
+      ? (value.structuredContent as Record<string, unknown>)
+      : value;
+  return {
+    ...(structured.suppressReply === true ? { suppressReply: true } : {}),
+    ...(structured.confirmationDialogPosted === true
+      ? { confirmationDialogPosted: true }
+      : {}),
+  };
 }
 
 function usageFromMessage(message: any): AgentUsage | undefined {
@@ -89,18 +115,26 @@ export async function* adaptAnthropicStream(
       }
 
       if (message.type === "user") {
+        const structured = lifecycleFlags((message as any).tool_use_result);
         for (const block of ((message as any).message?.content ??
-          (message as any).content ?? []) as any[]) {
+          (message as any).content ??
+          []) as any[]) {
           if (block.type !== "tool_result") continue;
           const output = blockText(block.content);
+          // Structured tool output is authoritative. Prose matching stays as a
+          // fallback for tools that only signal these lifecycles in their text.
+          const flags = {
+            ...(SUPPRESS_REPLY.test(output) ? { suppressReply: true } : {}),
+            ...(/confirmation dialog has been posted/i.test(output)
+              ? { confirmationDialogPosted: true }
+              : {}),
+            ...structured,
+          };
           yield {
             type: "tool_result",
             callId: block.tool_use_id,
             output,
-            ...(SUPPRESS_REPLY.test(output) ? { suppressReply: true } : {}),
-            ...( /confirmation dialog has been posted/i.test(output)
-              ? { confirmationDialogPosted: true }
-              : {}),
+            ...flags,
             ...(block.is_error ? { isError: true } : {}),
           };
         }
@@ -116,7 +150,10 @@ export async function* adaptAnthropicStream(
           message.subtype === "error_max_turns"
         ) {
           terminalEmitted = true;
-          yield terminal("limit", { reason: message.subtype, usage: terminalUsage });
+          yield terminal("limit", {
+            reason: message.subtype,
+            usage: terminalUsage,
+          });
           break;
         } else if (message.subtype === "success") {
           terminalEmitted = true;
