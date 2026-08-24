@@ -69,3 +69,6 @@ __pycache__/
 
 # Misc
 .node-version
+
+# Live verification run artefacts
+e2e/report/
