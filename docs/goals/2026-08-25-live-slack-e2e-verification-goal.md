@@ -170,7 +170,26 @@ an unhandled rejection that kills the process after the suite finishes, not as a
 thrown error. Unit tests rely on `src/test-support/offline-guard.ts` to refuse
 the socket.
 
-### 4.4 Layout
+### 4.4 Host profiles, and why cycles must not share one
+
+Cycles are grouped into three host profiles, and each group gets its own child
+process per provider:
+
+- `default` — fixture MCP server and workspace file
+- `actions` — as `default`, plus the approval-gated fixture action
+- `failing-provider` — provider base URL pointed at a local failing endpoint
+
+This is not tidiness. The fixture action is registered with `alwaysInject`, so
+on a host that loads it every turn is offered a "record a verification code"
+tool. The model will sometimes call it during an unrelated cycle: a full matrix
+run had `mcp-tool` fail because the agent called the approval action first,
+which posted a confirmation dialog and derailed the turn. That failure was
+non-deterministic — the same cycle had passed twice before — and a flaky
+verification suite is worse than none, because it teaches its readers to ignore
+red. Isolating by profile removes the interference structurally rather than
+hoping the model behaves.
+
+### 4.5 Layout
 
 ```
 e2e/

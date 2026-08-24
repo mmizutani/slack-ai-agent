@@ -15,7 +15,7 @@ import { pollUntil } from "../lib/slack";
 export const providerError: Cycle = {
   id: "provider-error",
   describe: "a provider failure is reported to the user, not swallowed",
-  needsFakeProvider: true,
+  profile: "failing-provider" as const,
   // The provider SDKs retry with backoff before surfacing a terminal error, so
   // this path is legitimately slower than any healthy turn. Measured at ~200s
   // against a failing Anthropic endpoint.

@@ -67,16 +67,35 @@ export interface CycleContext {
 
 export type CycleOutcome = void | { gap?: string; evidence?: string };
 
+/**
+ * Host variants a cycle can require.
+ *
+ * - `default`      fixture MCP server and workspace file, no custom actions
+ * - `actions`      as default, plus the approval-gated fixture action
+ * - `failing-provider` provider base URL pointed at a local failing endpoint
+ */
+export type CycleProfile = "default" | "actions" | "failing-provider";
+
+export const CYCLE_PROFILES: CycleProfile[] = [
+  "default",
+  "actions",
+  "failing-provider",
+];
+
 export interface Cycle {
   id: string;
   /** One line, shown in the report. */
   describe: string;
   /**
-   * Run this cycle on a host whose provider base URL points at a local
-   * endpoint that fails every request. Such cycles need their own host,
-   * because the override is process-wide.
+   * Which host this cycle needs. Cycles sharing a profile share one process.
+   *
+   * Profiles exist to stop cycles interfering with each other. The fixture
+   * custom action is registered with alwaysInject, so on a host that loads it
+   * every turn is offered a "record a verification code" tool — and the model
+   * will sometimes call it during an unrelated cycle, derailing that cycle
+   * non-deterministically. Only the approval cycle gets that host.
    */
-  needsFakeProvider?: boolean;
+  profile?: CycleProfile;
   /**
    * Per-cycle reply budget. Only set it where the app is legitimately slower
    * than the default, so one slow path does not hide regressions in the rest.

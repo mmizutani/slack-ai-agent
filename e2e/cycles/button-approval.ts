@@ -20,6 +20,7 @@ const APPROVE_ACTION_ID = "approve_action";
 export const buttonApproval: Cycle = {
   id: "button-approval",
   describe: "an approval button runs the action and posts its effect",
+  profile: "actions" as const,
   async run(ctx) {
     expect(ctx.fixtures !== undefined, "action fixtures were not installed");
 

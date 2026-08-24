@@ -17,8 +17,10 @@ import { phaseEnv } from "./lib/phase-env";
 import {
   cleanUp,
   makeContext,
+  CYCLE_PROFILES,
   type Cycle,
   type CycleOutcome,
+  type CycleProfile,
   type Trace,
 } from "./lib/cycle";
 import {
@@ -75,12 +77,11 @@ async function runPhase(
     providerBaseUrl?: string;
     fakeProviderHits?: () => number;
     fixtures?: FixtureSet;
+    profile?: CycleProfile;
   } = {},
 ): Promise<CycleResult[]> {
   const results: CycleResult[] = [];
-  const label = options.providerBaseUrl
-    ? `${provider}-failing-provider`
-    : `${provider}-phase`;
+  const label = `${provider}-${options.profile ?? "default"}`;
   const host = await AgentHost.start({
     label,
     env: phaseEnv(process.env, {
@@ -91,7 +92,12 @@ async function runPhase(
       ...(options.fixtures
         ? {
             mcpConfigPath: options.fixtures.mcpConfigPath,
-            customActionsDir: options.fixtures.customActionsDir,
+            // Only the actions profile loads the fixture action; elsewhere its
+            // alwaysInject tool would be offered on every turn and sometimes
+            // called during an unrelated cycle.
+            ...(options.profile === "actions"
+              ? { customActionsDir: options.fixtures.customActionsDir }
+              : {}),
           }
         : {}),
     }),
@@ -212,22 +218,29 @@ async function main(): Promise<void> {
   });
 
   try {
-    const normal = cycles.filter(c => !c.needsFakeProvider);
-    const failing = cycles.filter(c => c.needsFakeProvider);
-
     for (const provider of config.providers) {
-      if (normal.length) {
-        results.push(
-          ...(await runPhase(config, provider, normal, track, { fixtures })),
-        );
-      }
-      if (failing.length) {
+      for (const profile of CYCLE_PROFILES) {
+        const group = cycles.filter(c => (c.profile ?? "default") === profile);
+        if (!group.length) continue;
+
+        if (profile !== "failing-provider") {
+          results.push(
+            ...(await runPhase(config, provider, group, track, {
+              fixtures,
+              profile,
+            })),
+          );
+          continue;
+        }
+
         // Its own host: the base URL override is process-wide, so it cannot
         // share a process with cycles that need the provider to work.
         const fake = await startFakeProvider();
         try {
           results.push(
-            ...(await runPhase(config, provider, failing, track, {
+            ...(await runPhase(config, provider, group, track, {
+              fixtures,
+              profile,
               providerBaseUrl: fake.url,
               fakeProviderHits: fake.hits,
             })),
