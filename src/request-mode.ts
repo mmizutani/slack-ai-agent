@@ -1,8 +1,4 @@
-import {
-  EffortLevel,
-  ModelRef,
-  parseModelRef,
-} from "./agent/model";
+import { EffortLevel, ModelRef, tryParseModelRef } from "./agent/model";
 import { getAnthropicModelCapabilities } from "./runtimes/anthropic/model-capabilities";
 import { getOpenAIModelCapabilities } from "./runtimes/openai/model-capabilities";
 
@@ -88,7 +84,8 @@ const MODE_TIERS: {
 const getCapabilities = (model: ModelSetting | undefined) => {
   if (!model) return getAnthropicModelCapabilities();
   const modelRef =
-    typeof model === "string" ? parseModelRef(model) : (model as ModelRef);
+    typeof model === "string" ? tryParseModelRef(model) : (model as ModelRef);
+  if (!modelRef) return getAnthropicModelCapabilities();
   return modelRef.provider === "openai"
     ? getOpenAIModelCapabilities(modelRef)
     : getAnthropicModelCapabilities(modelRef);
@@ -118,10 +115,19 @@ export const resolveMode = (
     );
   });
 
-  const channelModel = channelMode?.model;
+  // Channel model strings come from operator-edited YAML and are never
+  // validated on load. Drop an unparseable value and fall back to the
+  // deployment default, matching how the fastModePattern branch below fails
+  // open — otherwise one bad channel entry sends every message in that channel
+  // to the generic error path.
+  const configuredModel = channelMode?.model;
+  const channelModel =
+    typeof configuredModel === "string" && !tryParseModelRef(configuredModel)
+      ? undefined
+      : configuredModel;
   const channelProvider =
     typeof channelModel === "string"
-      ? parseModelRef(channelModel).provider
+      ? tryParseModelRef(channelModel)?.provider
       : channelModel?.provider;
   const matchedModel = matched?.mode.model;
   // Phrase/emoji tiers predate provider routing and their unqualified model
@@ -130,7 +136,7 @@ export const resolveMode = (
   let model =
     channelProvider === "openai" && typeof matchedModel === "string"
       ? channelModel
-      : matchedModel ?? channelModel;
+      : (matchedModel ?? channelModel);
   let effort = matched?.mode.effort ?? channelMode?.effort;
   // Either condition independently enables fast mode (OR, not AND).
   let patternMatch = false;
@@ -147,7 +153,12 @@ export const resolveMode = (
 
   // When a trigger only sets effort (no model), release a channel Haiku pin
   // so the effort can actually take effect.
-  if (matched && !matched.mode.model && effort && !supportsEffort(model, effort)) {
+  if (
+    matched &&
+    !matched.mode.model &&
+    effort &&
+    !supportsEffort(model, effort)
+  ) {
     model = undefined;
   }
   if (effort && !supportsEffort(model, effort)) effort = undefined;

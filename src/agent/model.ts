@@ -44,6 +44,19 @@ export function parseModelRef(value: string): ModelRef {
   return { provider, model };
 }
 
+/**
+ * Parse a model reference from operator-editable configuration. Returns
+ * undefined instead of throwing so a malformed value can fail open to the
+ * deployment default rather than aborting the turn that read it.
+ */
+export function tryParseModelRef(value: string): ModelRef | undefined {
+  try {
+    return parseModelRef(value);
+  } catch {
+    return undefined;
+  }
+}
+
 export function formatModelRef(model: ModelRef): string {
   return `${model.provider}/${model.model}`;
 }

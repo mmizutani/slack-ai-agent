@@ -257,6 +257,24 @@ describe("SlackHandler", () => {
     ).toEqual({ provider: "openai", model: "gpt-5.6-luna" });
   });
 
+  // Operator-edited channel YAML is never validated on load, so a malformed
+  // reference must fall back to the deployment default instead of throwing out
+  // of the turn.
+  it.each(["gemini/pro", "openai/", ""])(
+    "falls back to the default model for the malformed model reference %p",
+    malformed => {
+      expect(() =>
+        priv(handler).resolveEffectiveModel({ model: malformed }),
+      ).not.toThrow();
+      expect(priv(handler).resolveEffectiveModel({ model: malformed })).toEqual(
+        {
+          provider: "anthropic",
+          model: "claude-opus-5",
+        },
+      );
+    },
+  );
+
   it("records provider-neutral total timing and Claude compatibility timing only for Anthropic", () => {
     const openaiTimings: Record<string, number> = {};
     priv(handler).recordAgentTotalTiming(openaiTimings, "openai", 12);

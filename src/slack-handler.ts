@@ -31,7 +31,7 @@ import {
 import { SessionManager } from "./sessions/session-manager";
 import { AgentRuntimeRegistry } from "./runtimes/registry";
 import type { RuntimeToolBundle } from "./agent/events";
-import { ModelRef, parseModelRef } from "./agent/model";
+import { ModelRef, tryParseModelRef } from "./agent/model";
 import type { CustomActionRegistry } from "./custom-actions";
 import { McpManager } from "./mcp-manager";
 import { resolveMcpServers } from "./mcp/resolver";
@@ -152,8 +152,9 @@ export class SlackHandler {
           (legacySessionOwner.getSession as any)(...args),
         createSession: (...args: Parameters<SessionOwner["createSession"]>) =>
           (legacySessionOwner.createSession as any)(...args),
-        cleanupInactiveSessions: (...args: Parameters<SessionOwner["cleanupInactiveSessions"]>) =>
-          (legacySessionOwner.cleanupInactiveSessions as any)(...args),
+        cleanupInactiveSessions: (
+          ...args: Parameters<SessionOwner["cleanupInactiveSessions"]>
+        ) => (legacySessionOwner.cleanupInactiveSessions as any)(...args),
         touchSession: (session: ConversationSession) => {
           session.lastActivity = new Date();
         },
@@ -1353,9 +1354,16 @@ export class SlackHandler {
 
   private resolveEffectiveModel(requestMode: RequestMode): ModelRef {
     const configured = requestMode.model ?? config.agent.defaultModel;
-    return typeof configured === "string"
-      ? parseModelRef(configured)
-      : configured;
+    if (typeof configured !== "string") return configured;
+    // The reference may originate from operator-edited channel YAML, which is
+    // not validated on load. Fail open to the deployment default rather than
+    // ending the turn in the generic error path.
+    const parsed = tryParseModelRef(configured);
+    if (parsed) return parsed;
+    this.logger.warn("Ignoring malformed model reference", {
+      model: configured,
+    });
+    return config.agent.defaultModel;
   }
 
   private recordAgentTotalTiming(
@@ -1387,7 +1395,11 @@ export class SlackHandler {
 
     if (this.customActionRegistry) {
       const context = {
-        userId: slackContext.user || slackContext.botId || slackContext.workflowId || "slack-workflow",
+        userId:
+          slackContext.user ||
+          slackContext.botId ||
+          slackContext.workflowId ||
+          "slack-workflow",
         channel: slackContext.channel,
         channelType: slackContext.channelType,
         threadTs: slackContext.threadTs,
@@ -1399,10 +1411,11 @@ export class SlackHandler {
         reactionKey: slackContext.reactionKey,
         workingDirectory: session.workingDirectory,
       };
-      tools.actionDefinitions = this.customActionRegistry.getActionToolDefinitions(
-        context,
-        injectAllActions ? undefined : action => action.alwaysInject === true,
-      );
+      tools.actionDefinitions =
+        this.customActionRegistry.getActionToolDefinitions(
+          context,
+          injectAllActions ? undefined : action => action.alwaysInject === true,
+        );
     }
 
     if (this.mcpManager) {
@@ -1417,9 +1430,10 @@ export class SlackHandler {
           });
           tools.mcpDefinitions = resolved;
         }
-        const role = event.bot_id || event.workflow_id
-          ? (await this.mcpManager.getHighestRole()) || "none"
-          : (await UserUtils.getUserRole(event.user)) || "none";
+        const role =
+          event.bot_id || event.workflow_id
+            ? (await this.mcpManager.getHighestRole()) || "none"
+            : (await UserUtils.getUserRole(event.user)) || "none";
         tools.permissionPolicy =
           await this.mcpManager.getEffectiveToolPolicy(role);
       } catch (error) {

@@ -9,7 +9,10 @@ import { parseModelRef } from "./agent/model";
 describe("parseModelRef", () => {
   it.each([
     ["claude-opus-5", { provider: "anthropic", model: "claude-opus-5" }],
-    ["anthropic/claude-opus-5", { provider: "anthropic", model: "claude-opus-5" }],
+    [
+      "anthropic/claude-opus-5",
+      { provider: "anthropic", model: "claude-opus-5" },
+    ],
     ["openai/gpt-5.6-luna", { provider: "openai", model: "gpt-5.6-luna" }],
   ])("parses %p", (value, expected) => {
     expect(parseModelRef(value)).toEqual(expected);
@@ -236,6 +239,23 @@ describe("resolveMode", () => {
 
   it("does not activate fast mode via fastModeTagBot without mention", () => {
     expect(resolveMode("hi", { fastModeTagBot: true }, false)).toEqual({});
+  });
+
+  // Channel model strings come from operator-edited YAML. A malformed value
+  // must not throw out of resolveMode and end every message in that channel in
+  // the generic error path — the fastModePattern branch already fails open.
+  it.each(["", "   ", "gemini/pro", "openai/", "anthropic/"])(
+    "fails open on the malformed channel model %p",
+    malformed => {
+      expect(() => resolveMode("hello", { model: malformed })).not.toThrow();
+      expect(resolveMode("hello", { model: malformed })).toEqual({});
+    },
+  );
+
+  it("keeps a message trigger working when the channel model is malformed", () => {
+    expect(resolveMode("think hard", { model: "gemini/pro" })).toEqual({
+      effort: "max",
+    });
   });
 
   it("composes fastModePattern and fastModeTagBot via OR", () => {
