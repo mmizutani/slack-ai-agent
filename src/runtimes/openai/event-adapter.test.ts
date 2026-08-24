@@ -137,7 +137,7 @@ describe("OpenAI stream event adapter", () => {
     );
   });
 
-  it("classifies aborts and max-turn failures as terminal outcomes", async () => {
+  it("classifies an abort as a cancelled terminal outcome", async () => {
     const controller = new AbortController();
     controller.abort();
     const events = await collect(
@@ -152,6 +152,57 @@ describe("OpenAI stream event adapter", () => {
       outcome: "cancelled",
       reason: "aborted",
     });
+  });
+
+  it("classifies a max-turn failure as a limit terminal outcome", async () => {
+    const error = Object.assign(new Error("max turns exceeded"), {
+      name: "MaxTurnsExceededError",
+    });
+    const events = await collect(
+      adaptOpenAIStream((async function* () {})(), { result: { error } }),
+    );
+
+    expect(events).toContainEqual({
+      type: "terminal",
+      outcome: "limit",
+      reason: "max_turns",
+    });
+  });
+
+  // Cancelling a Slack turn must not then wait out the settlement budget.
+  it("emits the cancelled terminal without waiting for settlement", async () => {
+    const controller = new AbortController();
+    const stream = (async function* () {
+      yield {
+        type: "raw_model_stream_event",
+        data: { type: "output_text_delta", delta: "partial" },
+      };
+      controller.abort();
+      yield {
+        type: "raw_model_stream_event",
+        data: { type: "output_text_delta", delta: "ignored" },
+      };
+    })();
+
+    // Never settles: without the abort check the generator burns the whole
+    // settlement budget before reporting the cancellation.
+    const completed = new Promise<void>(() => undefined);
+    const started = Date.now();
+
+    const events = await collect(
+      adaptOpenAIStream(stream, {
+        signal: controller.signal,
+        result: { completed },
+        settlementTimeoutMs: 400,
+      }),
+    );
+
+    expect(events).toContainEqual({
+      type: "terminal",
+      outcome: "cancelled",
+      reason: "aborted",
+    });
+    expect(Date.now() - started).toBeLessThan(200);
   });
 
   it("emits SDK-session state without requiring a response id", async () => {

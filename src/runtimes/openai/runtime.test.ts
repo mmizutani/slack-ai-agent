@@ -422,6 +422,107 @@ describe("OpenAIAgentRuntime", () => {
     );
   });
 
+  it("does not retry a transient failure raised after a tool call", async () => {
+    const stream = Object.assign(
+      (async function* () {
+        yield {
+          type: "run_item_stream_event",
+          name: "tool_called",
+          item: {
+            rawItem: {
+              type: "function_call",
+              callId: "call-1",
+              name: "create_ticket",
+              arguments: "{}",
+            },
+          },
+        };
+        throw Object.assign(new Error("upstream unavailable"), { status: 503 });
+      })(),
+      { currentTurn: 1 },
+    );
+    const run = jest.fn().mockResolvedValue(stream);
+    const runtime = new OpenAIAgentRuntime({
+      runner: { run } as any,
+      apiKey: "test-key",
+    });
+
+    const events = await collect(
+      runtime.stream({
+        prompt: "do it",
+        session: {
+          userId: "U1",
+          channelId: "C1",
+          workingDirectory: "/tmp/work",
+          providerState: {},
+          lastActivity: new Date(),
+        },
+        model: { provider: "openai", model: "gpt-5.6-luna" },
+        signal: new AbortController().signal,
+        maxTurns: 4,
+        permissions: {},
+        tools: {},
+        metadata: { requestId: "r3b", sessionKey: "s3b" },
+      }),
+    );
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "terminal", outcome: "failed" }),
+    );
+  });
+
+  // A consumer that throws back into the generator resumes at the suspended
+  // yield, which lands in the retry catch. Replaying the prompt there would
+  // re-stream text the user already saw and re-run tools that already ran.
+  it("does not retry once the stream has emitted an event", async () => {
+    const stream = Object.assign(
+      (async function* () {
+        yield {
+          type: "raw_model_stream_event",
+          data: { type: "output_text_delta", delta: "partial" },
+        };
+        await new Promise(() => undefined);
+      })(),
+      { currentTurn: 1 },
+    );
+    const run = jest.fn().mockResolvedValue(stream);
+    const runtime = new OpenAIAgentRuntime({
+      runner: { run } as any,
+      apiKey: "test-key",
+    });
+
+    const iterator = runtime.stream({
+      prompt: "answer",
+      session: {
+        userId: "U1",
+        channelId: "C1",
+        workingDirectory: "/tmp/work",
+        providerState: {},
+        lastActivity: new Date(),
+      },
+      model: { provider: "openai", model: "gpt-5.6-luna" },
+      signal: new AbortController().signal,
+      maxTurns: 4,
+      permissions: {},
+      tools: {},
+      metadata: { requestId: "r3c", sessionKey: "s3c" },
+    });
+
+    expect(await iterator.next()).toEqual({
+      value: { type: "text_delta", text: "partial" },
+      done: false,
+    });
+    const settled = await iterator.throw(
+      Object.assign(new Error("upstream unavailable"), { status: 503 }),
+    );
+
+    expect(settled.value).toEqual(
+      expect.objectContaining({ type: "terminal", outcome: "failed" }),
+    );
+    expect(run).toHaveBeenCalledTimes(1);
+  });
+
   it("exposes only explicitly authorized workspace tools and lets deny win", async () => {
     const stream = Object.assign((async function* () {})(), {
       finalOutput: "ok",

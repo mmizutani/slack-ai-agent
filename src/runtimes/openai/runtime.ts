@@ -121,17 +121,21 @@ export class OpenAIAgentRuntime implements AgentRuntime {
     }
   }
 
-  /** Release every request-scoped MCP server, whichever set it came from. */
+  /**
+   * Release every request-scoped MCP server, whichever set it came from.
+   * Settled together: a rejecting bundle close must not skip the configured
+   * servers, and no cleanup failure may replace the generator's own outcome.
+   */
   private async closeMcpServers(
     mcpBundle: { close(): Promise<void> },
     configuredMcpServers: readonly RuntimeMcpServerHandle[],
   ): Promise<void> {
-    await mcpBundle.close();
-    await Promise.allSettled(
-      configuredMcpServers.map(server =>
+    await Promise.allSettled([
+      mcpBundle.close(),
+      ...configuredMcpServers.map(server =>
         typeof server.close === "function" ? server.close() : undefined,
       ),
-    );
+    ]);
   }
 
   async *stream(request: AgentRunRequest) {
@@ -197,7 +201,7 @@ export class OpenAIAgentRuntime implements AgentRuntime {
         ],
       });
     } catch (error) {
-      await mcpBundle.close();
+      await this.closeMcpServers(mcpBundle, configuredMcpServers);
       yield {
         type: "terminal",
         outcome: "failed",
@@ -260,6 +264,10 @@ export class OpenAIAgentRuntime implements AgentRuntime {
 
     try {
       for (let attempt = 0; attempt < 2; attempt++) {
+        // A retry replays the prompt from scratch. Once anything has been
+        // emitted, the consumer has already shown that text and run those
+        // tools, so a second attempt would duplicate both.
+        let emitted = false;
         try {
           const stream = await this.runner.run(agent, request.prompt, {
             stream: true,
@@ -277,12 +285,14 @@ export class OpenAIAgentRuntime implements AgentRuntime {
             if (event.type === "session_update") {
               request.session.providerState.openai = event.state;
             }
+            emitted = true;
             yield event;
           }
           return;
         } catch (error) {
           if (
             attempt === 0 &&
+            !emitted &&
             !request.signal.aborted &&
             (error as any)?.name !== "AbortError" &&
             isTransientPreRunFailure(error)

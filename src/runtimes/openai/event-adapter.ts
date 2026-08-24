@@ -262,7 +262,9 @@ export async function* adaptOpenAIStream(
       }
     }
 
-    if (result?.completed) {
+    // An aborted turn is already decided. Waiting out the settlement budget
+    // only delays the cancellation the caller is waiting for.
+    if (result?.completed && !options.signal?.aborted) {
       await awaitSettlement(
         result.completed,
         options.settlementTimeoutMs ?? DEFAULT_SETTLEMENT_TIMEOUT_MS,
