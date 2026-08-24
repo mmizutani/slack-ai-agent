@@ -1,351 +1,370 @@
 # Goal: Automated Live-Slack End-to-End Verification for Both Runtimes
 
 > **For agentic workers:** This document is the complete brief. Everything you
-> need — workspace identifiers, credential names, broken preconditions, file
-> seams, and the acceptance gate — is stated here or reachable from a path named
-> here. Do not ask the human for missing context; probe the repository and the
-> live APIs instead.
+> need — workspace identifiers, credential names, the seams the harness relies
+> on, its known limits, and the acceptance gate — is stated here or reachable
+> from a path named here. Do not ask the human for missing context; probe the
+> repository and the live APIs instead.
 >
 > REQUIRED SUB-SKILLS: `superpowers:test-driven-development` for every pure
-> module you add, and `superpowers:verification-before-completion` before you
-> claim any part of this done.
+> module you add, and `superpowers:verification-before-completion` before
+> claiming any part of this done.
 
 **Goal:** Give this repository an automated end-to-end verification cycle that
 exercises the real Slack agent, in a real Slack workspace, against both the
-Anthropic and the OpenAI runtime — so that a coding agent changing this codebase
-can prove its change works in production conditions without a human driving
-Slack by hand.
+Anthropic and the OpenAI runtime — so a coding agent changing this codebase can
+prove its change works in production conditions without a human driving Slack
+by hand.
 
 **Success looks like:** `pnpm e2e:live` runs unattended, drives real Slack
 traffic through the real bot on both runtimes, asserts deterministically, cleans
-up after itself, exits non-zero on any regression, and writes a machine-readable
-report an agent can read back.
+up after itself, exits non-zero on any regression, and writes a
+machine-readable report an agent can read back.
 
 ---
 
 ## 1. Why this exists
 
-The repository already documents this exact hole. `docs/plans/2026-08-23-openai-agents-sdk-support.md:15`:
+The repository already documents the hole.
+`docs/plans/2026-08-23-openai-agents-sdk-support.md:15`:
 
 > Live Slack and external MCP end-to-end verification remain deployment-environment gates.
 
-And `docs/design/2026-08-23-slack-ai-agent-openai-agents-sdk-design.md:1500` (§24.5)
+And §24.5 of `docs/design/2026-08-23-slack-ai-agent-openai-agents-sdk-design.md`
 specifies integration smoke tests that were only ever half-built.
 
-What exists today:
+Before this work, the only live check was `scripts/openai-smoke.ts`, which calls
+the OpenAI Responses API directly and never touches Slack. The 500-odd Jest
+tests are structurally incapable of reaching the network:
+`src/test-support/offline-guard.ts` scrubs provider credentials and refuses
+outbound sockets. Nothing exercised Socket Mode delivery, `SlackHandler` event
+routing, session continuity, the reaction lifecycle, workspace or MCP tool
+execution, the approval-button path, cancellation, or provider-error handling.
 
-- `scripts/openai-smoke.ts` — calls the OpenAI Responses API directly. It never
-  touches Slack, never boots the app, and has no Anthropic counterpart.
-- 509 Jest unit tests that are **structurally incapable** of reaching the
-  network: `src/test-support/offline-guard.ts` scrubs every provider credential
-  and refuses outbound sockets and provider-CLI spawns.
-
-So nothing verifies the parts that actually break in production: Socket Mode
-delivery, `SlackHandler` event routing, session continuity across a thread,
-reaction lifecycle, MCP and workspace tool execution, the approval-button path,
-cancellation, and provider-error handling.
+**This was not theoretical.** The harness found two defects on its first live
+run, both of which left a fresh checkout unable to answer at all, and both
+invisible to the existing tests. They are described in §7.
 
 ---
 
 ## 2. Workspace binding
 
-These are live values for this deployment. The harness must read them from the
-environment, never hard-code them.
+Live values for this deployment. The harness reads them from the environment or
+derives them; nothing is hard-coded in `src/` or `e2e/`.
 
-| Thing           | Value                                                    | Env var to introduce         |
-| --------------- | -------------------------------------------------------- | ---------------------------- |
-| Slack workspace | `watervalley` / `T1LBJN3D2`                              | (from `SLACK_WORKSPACE_URL`) |
-| Test channel    | `#slack-ai-agent-test` / `C0BRUSM9M4P`                   | `E2E_SLACK_CHANNEL_ID`       |
-| Bot user        | `codepilot` / `U0BQUP1M6ER` (bot_id `B0BQYDJP0MQ`)       | `E2E_BOT_USER_ID`            |
-| Slack App       | `A0BQS7CTWR1` (`https://api.slack.com/apps/A0BQS7CTWR1`) | —                            |
-| Driver identity | `minoru` / `U1LBQTL8G`                                   | `E2E_DRIVER_USER_ID`         |
+| Thing           | Value                                  | How the harness gets it                    |
+| --------------- | -------------------------------------- | ------------------------------------------ |
+| Slack workspace | `watervalley` / `T1LBJN3D2`            | `auth.test`                                |
+| Test channel    | `#slack-ai-agent-test` / `C0BRUSM9M4P` | `--channel` flag or `E2E_SLACK_CHANNEL_ID` |
+| Bot user        | `codepilot` / `U0BQUP1M6ER`            | `auth.test` with the bot token             |
+| Slack App       | `A0BQS7CTWR1`                          | —                                          |
+| Driver identity | `minoru` / `U1LBQTL8G`                 | `auth.test` with the user token            |
 
-Credentials already present in `.env` (names only — never print values):
+Only the channel needs configuring. Credentials already in `.env` (names only —
+never print values):
 
-- `CC_SLACK_BOT_TOKEN` (`xoxb`) — bot. Used for reaction reads, `conversations.open`, bot-message cleanup.
+- `CC_SLACK_BOT_TOKEN` (`xoxb`) — reaction reads, `conversations.open`, bot-message cleanup.
 - `CC_SLACK_APP_TOKEN` (`xapp`) — Socket Mode.
 - `CC_SLACK_SIGNING_SECRET`.
-- `SLACK_MCP_XOXP_TOKEN` (`xoxp`, user `U1LBQTL8G`) — **the driver**. Verified to hold `chat:write`, so it can post and delete its own messages. No user-scope change is required.
+- `SLACK_MCP_XOXP_TOKEN` (`xoxp`) — **the driver**. Holds `chat:write`, so it can post and delete its own messages.
 - `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`.
 
-Models for the matrix: `anthropic/claude-haiku-4-5` and `openai/gpt-5.6-luna`
-(`DEFAULT_OPENAI_MODEL`, `src/runtimes/openai/model-config.ts:1`). Use the cheap
-tier deliberately — this suite is meant to be run often.
+Phase models are pinned in `e2e/lib/phase-env.ts` to `anthropic/claude-haiku-4-5`
+and `openai/gpt-5.6-luna` — the cheap tier, deliberately, because this suite is
+meant to be run often.
 
 ---
 
-## 3. Preconditions that are broken right now
+## 3. Preconditions
 
-Fix these **before** building, and verify each fix with the command given.
-Both were confirmed by direct probe, not inference.
+Both of these were broken when this work started and have been fixed. Verify
+them before blaming the harness.
 
-### 3.1 The installed bot is missing five declared scopes
+### 3.1 Bot scopes
 
-`slack-app-manifest.yaml` declares them; the installed app does not have them.
-Installed scopes are: `app_mentions:read, chat:write, im:write, reactions:write,
-assistant:write, channels:history, groups:history, im:history, im:read,
-reactions:read, users:read`. Missing: **`channels:read`, `groups:read`,
-`groups:write`, `chat:write.public`, `files:read`**.
+The installed app must hold `channels:read`, `groups:read`, `groups:write`,
+`chat:write.public` and `files:read` in addition to its original eleven. They
+were missing, so `conversations.info` returned `missing_scope` and
+`ChannelConfigManager.lookupChannelType` failed **closed** to `"im"`
+(`src/channel-config.ts:288-295`) — every public-channel `app_mention` was
+processed as a DM, skipping the conditional-reply branch and applying DM privacy
+redaction. The reply still arrived, so only a log assertion catches it.
 
-This is not cosmetic. `conversations.info` returns `missing_scope: channels:read`,
-and `ChannelConfigManager.lookupChannelType` fails **closed** to `"im"`
-(`src/channel-config.ts:288-295`). Consequence: every public-channel `app_mention`
-is currently processed as though it were a DM — the conditional-reply branch in
-`src/slack-handler.ts:2551-2559` is skipped and DM privacy redaction is applied
-to a public channel. A naive E2E test would go green while exercising the wrong
-branch entirely.
-
-Fix at `https://api.slack.com/apps/A0BQS7CTWR1` → _OAuth & Permissions_ → add the
-bot scopes → _Reinstall to Workspace_. Then verify:
+Add scopes at `https://api.slack.com/apps/A0BQS7CTWR1` → _OAuth & Permissions_ →
+_Reinstall to Workspace_. Verify:
 
 ```bash
 set -a; . ./.env; set +a
 curl -s -H "Authorization: Bearer $CC_SLACK_BOT_TOKEN" \
-  "https://slack.com/api/conversations.info?channel=$E2E_SLACK_CHANNEL_ID" \
+  "https://slack.com/api/conversations.info?channel=C0BRUSM9M4P" \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("ok"), d.get("error"), (d.get("channel") or {}).get("name"))'
 ```
 
-Required output: `True None slack-ai-agent-test`.
+Required: `True None slack-ai-agent-test`. Reinstalling did **not** rotate the
+bot token in this workspace, but check `auth.test` afterwards rather than
+assuming.
 
-Note: reinstalling rotates `CC_SLACK_BOT_TOKEN`. Update `.env` afterwards and
-re-run `auth.test`.
+The `channel-mention` cycle guards this permanently by asserting the app never
+logged `Failed to look up channel type`.
 
-### 3.2 `.env` names an Anthropic model that does not exist
+### 3.2 Model identifier
 
-`.env` sets `AGENT_DEFAULT_MODEL=anthropic/claude-haiku-4.5`. `parseModelRef`
-(`src/agent/model.ts:30-45`) only splits on `/` and never validates the model
-name, so this passes configuration and fails at the API on every turn. Probed:
+`.env` named `anthropic/claude-haiku-4.5`, which does not exist. `parseModelRef`
+(`src/agent/model.ts:30-45`) only splits on `/` and never validates the name, so
+it passed configuration and failed at the API on every turn. The canonical id
+uses hyphens (`claude-haiku-4-5`, resolving to `claude-haiku-4-5-20251001`).
 
-- `claude-haiku-4.5` → `{"type":"not_found_error"}`
-- `claude-haiku-4-5` → resolves to `claude-haiku-4-5-20251001`
-
-Correct it to `anthropic/claude-haiku-4-5`. Verify:
-
-```bash
-set -a; . ./.env; set +a
-curl -s https://api.anthropic.com/v1/messages \
-  -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" \
-  -H "content-type: application/json" \
-  -d '{"model":"claude-haiku-4-5","max_tokens":8,"messages":[{"role":"user","content":"hi"}]}' \
-  | python3 -c 'import sys,json;print(json.load(sys.stdin).get("model"))'
-```
-
-Required output: a concrete dated model id.
-
-**Design note worth acting on:** that a typo in a model id can reach the provider
-is a validation gap. Do not add a hard allowlist — model ids change faster than
-this repo does. A cheap, honest gate is a startup log line naming the resolved
-`ModelRef` for every enabled provider, so a bad id is visible in the first ten
-lines of `pnpm start` instead of in a user's failed Slack thread.
+**Still open, and worth doing:** nothing surfaces a bad model id until a user's
+turn fails. Do not add a hard allowlist — model ids change faster than this repo
+does. Log the resolved `ModelRef` for every enabled provider at startup, so a
+typo is visible in the first ten lines of `pnpm start`.
 
 ---
 
 ## 4. Harness architecture
 
-### 4.1 Why a child process per provider
+### 4.1 A child process per provider
 
 `src/config.ts` evaluates `defaultProvider`, `defaultModel` and `SANDBOX_ROOT` as
-**module-level constants at import time** (`src/config.ts:24, 152-158`). Two
-provider phases therefore cannot share one process. The harness parent forks one
-child per phase. This is not merely a workaround — it also proves the
-single-provider startup path that
-`docs/design/2026-08-23-slack-ai-agent-openai-agents-sdk-design.md` lists as an
-exit criterion ("OpenAI-only startup works").
+module-level constants at import time (`src/config.ts:24, 152-158`), so two
+provider phases cannot share a process. The parent forks one child per phase
+(`e2e/agent-host.ts`), which also proves the single-provider startup path listed
+as an exit criterion in the OpenAI design doc.
 
-### 4.2 Why IPC, not HTTP
+**The dotenv trap.** The child imports `src/config.ts`, which calls
+`dotenv.config()`, and dotenv fills in any variable _absent_ from the
+environment. Deleting the other provider's API key therefore hands it straight
+back from `.env`, silently re-enabling the provider the phase excludes.
+`phaseEnv` blanks those variables instead: an empty string is present as far as
+dotenv is concerned and falsy everywhere the application tests it. The host
+reports the providers it actually enabled and the runner asserts on that, so
+this is verified rather than assumed.
 
-A Block Kit button click **cannot be originated through any Slack Web API**.
-There is no endpoint for it. But Bolt 4.7.3 exposes
+### 4.2 IPC, and the button click
 
-```
-processEvent(event: ReceiverEvent): Promise<void>
-```
+A Block Kit click **cannot be originated through any Slack Web API**. Bolt 4.7.3
+exposes `processEvent(event: ReceiverEvent)` publicly
+(`node_modules/@slack/bolt/dist/App.d.ts:226`), so the parent sends the child an
+IPC command and the child injects the exact `block_actions` payload Slack would
+have delivered, into the real middleware chain and the real
+`app.action("approve_action")` handler (`src/custom-actions/registry.ts:477`).
+Its side effects hit real Slack and are asserted there.
 
-as a **public** method (`node_modules/@slack/bolt/dist/App.d.ts:226` — note it
-carries no `private` modifier, unlike `private receiver` on line 102). So the
-parent sends the child an IPC command and the child injects the exact
-`block_actions` payload Slack would have delivered, through the real Bolt
-middleware chain into the real `app.action("approve_action")` handler
-(`src/custom-actions/registry.ts:477`). The handler's side effects — `chat.update`,
-`chat.postMessage` — hit real Slack and are asserted there.
+The payload's `action_id` and `value` are read back off the live confirmation
+message rather than reconstructed, so the harness never duplicates
+`parseButtonValue`'s encoding and cannot drift from it.
 
-Node IPC also avoids forging HMAC request signatures, and keeps the app in Socket
-Mode so every other cycle uses genuine Slack delivery.
+**Boundary, stated plainly:** this verifies our handler chain and its Slack side
+effects. It does not verify Slack's delivery of the click. Confirm
+_Interactivity_ is enabled once by hand at the app settings page — the tracked
+manifest has `interactivity.is_enabled: false`, which would break real users'
+clicks while leaving this cycle green.
 
-**State the boundary honestly in the report:** this cycle verifies our handler
-chain and its Slack side effects. It does not verify Slack's delivery of the
-click. Confirm _Interactivity_ is enabled once, by hand, at
-`https://api.slack.com/apps/A0BQS7CTWR1` — the tracked manifest has
-`interactivity.is_enabled: false`, which would break real users' clicks while
-leaving this cycle green.
+### 4.3 Constructing Bolt is not free of I/O
 
-**Do not reimplement the button `value` encoding.** Read the confirmation
-message back from Slack with `conversations.replies`, pull `action_id` and
-`value` off the rendered block, and inject those verbatim. That keeps the cycle
-correct even if `parseButtonValue` changes.
+Worth knowing before writing tests against `createApp`: with the default
+`tokenVerificationEnabled: true`, Bolt's `singleAuthorization`
+(`node_modules/@slack/bolt/dist/App.js:828-831`) fires `auth.test`
+**immediately** and leaves the promise floating, so an invalid token surfaces as
+an unhandled rejection that kills the process after the suite finishes, not as a
+thrown error. Unit tests rely on `src/test-support/offline-guard.ts` to refuse
+the socket.
 
-### 4.3 Layout
+### 4.4 Layout
 
 ```
 e2e/
-  run.ts                    # parent: CLI, phase matrix, report, exit code
-  agent-host.ts             # child: createApp() + start() + IPC injection listener
+  run.ts                    parent: CLI, phase matrix, report, exit code
+  agent-host.ts             child: createApp + start + IPC injection
   lib/
-    env.ts                  # load .env, validate, build per-phase env overlay
-    slack-driver.ts         # xoxp Web API: post, poll replies, reactions, cleanup
-    child.ts                # fork/readiness/teardown
-    nonce.ts                # per-run + per-cycle marker derivation   [pure]
-    payloads.ts             # block_actions payload builder            [pure]
-    matchers.ts             # reply/reaction/log assertions            [pure]
-    report.ts               # JSON + human summary                     [pure]
-  cycles/*.ts               # one file per cycle, see §5
+    config.ts               flags, preflight, guardrails
+    markers.ts              per-run/per-cycle markers, boundary-safe matching
+    slack.ts                Slack Web API client, polling
+    host.ts                 fork, readiness, log capture, teardown
+    phase-env.ts            per-phase environment overlay
+    block-actions.ts        button discovery and payload assembly
+    cycle.ts                cycle context, assertions, cleanup
+    deployment-config.ts    materialise/restore config files
+    fixtures.ts             fixture allowlist, MCP config, workspace file
+    report.ts               summarisation and exit code
+  cycles/*.ts               one file per cycle
   fixtures/
-    echo-mcp-server.ts      # stdio MCP server exposing e2e_echo
-    e2e-echo-action.ts      # custom action with an approval button
-    fake-provider-server.ts # local HTTP returning 500 / overloaded_error
+    echo-mcp-server.mjs     stdio MCP server exposing e2e_echo
+    fake-provider-server.ts local endpoint that fails every request
+    actions/e2e-approval.ts approval-gated custom action
 ```
 
 `e2e/` is chosen deliberately: `.gitignore` swallows `scripts/*` except
-`scripts/openai-smoke.ts`, and `jest.config.js` roots are `src` and `config`, so
-a harness under `e2e/` is tracked by git and excluded from `pnpm test` without
-any configuration surgery.
-
-### 4.4 Readiness and teardown
-
-Child readiness = the existing startup line `⚡️ Slack AI agent is running!`
-(`src/index.ts`). Do not sleep on a timer. Teardown must kill the child, delete
-every message the run created (driver messages with the user token, bot messages
-with the bot token), remove fixture files, and restore any deployment config it
-materialised.
+`scripts/openai-smoke.ts`, and `jest.config.js` roots were `src` and `config`.
+Adding `<rootDir>/e2e` to those roots runs `e2e/**/*.test.ts` in normal CI while
+`testMatch` leaves the live cycle modules alone.
 
 ---
 
 ## 5. Cycles
 
-Run the full `{anthropic, openai} × cycles` matrix. Every cycle derives a nonce
-`E2E-<runId>-<cycleId>` and instructs the bot to answer with an exact marker, so
-no assertion depends on model phrasing.
+The matrix is `{anthropic, openai} × 9 cycles`. Every cycle derives a marker
+`E2E-<runId>-<cycleId>`, so no assertion depends on model phrasing and a reply
+left over from an earlier run cannot satisfy a later one.
 
-| #   | Cycle               | Drive                                                                              | Assert                                                                                                 |
-| --- | ------------------- | ---------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------ |
-| 1   | `channel-mention`   | user posts `<@$E2E_BOT_USER_ID> reply with exactly OK-<nonce>` in the test channel | threaded reply contains the nonce; child log shows `channelType=channel` (guards §3.1 from regressing) |
-| 2   | `dm`                | bot `conversations.open({users})` to resolve the D-channel, user posts into it     | reply contains the nonce                                                                               |
-| 3   | `thread-continuity` | msg 1 plants a token; msg 2 in the same thread asks for it back                    | msg 2's reply echoes msg 1's token                                                                     |
-| 4   | `workspace-tool`    | fixture file written into `data/`, bot asked to read it                            | reply contains the file nonce **and** `workspace_read_file` appears in the tool log                    |
-| 5   | `mcp-tool`          | `e2e_echo` on the fixture stdio MCP server                                         | reply contains `MCP-OK-<nonce>`                                                                        |
-| 6   | `reactions`         | any turn                                                                           | `reactions.get` observes `thinking_face` then `white_check_mark`                                       |
-| 7   | `button-approval`   | inject `block_actions` per §4.2                                                    | the action's side-effect message lands in the real thread                                              |
-| 8   | `cancellation`      | two messages in rapid succession, same thread                                      | only the newer nonce is answered; abort visible in log                                                 |
-| 9   | `provider-error`    | `ANTHROPIC_BASE_URL` / `OPENAI_BASE_URL` pointed at the local fake server          | bot posts an error message and sets the `x` reaction                                                   |
+| #   | Cycle               | Asserts                                                                                                                                |
+| --- | ------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `channel-mention`   | threaded reply carries the marker; the app never logged `Failed to look up channel type` (guards §3.1)                                 |
+| 2   | `dm`                | reply carries the marker in an IM channel opened with the bot token (the driver holds `chat:write` but not `im:write`)                 |
+| 3   | `thread-continuity` | a follow-up in the same thread echoes a reference code only available from the first turn                                              |
+| 4   | `reactions`         | the terminal reaction appears; the in-progress one is reported as evidence, not asserted, because a fast turn can finish between polls |
+| 5   | `workspace-tool`    | the reply contains a file's contents _and_ the app recorded a non-zero tool-call count                                                 |
+| 6   | `mcp-tool`          | the reply contains the fixture MCP server's `MCP-OK-<code>`, a format absent from the prompt                                           |
+| 7   | `button-approval`   | the approval dialog is posted, the injected click runs the action, and its effect lands in the thread                                  |
+| 8   | `cancellation`      | a burst yields exactly one reply, and the first turn was superseded or abandoned                                                       |
+| 9   | `provider-error`    | a failing provider is reported to the user; the fake endpoint is confirmed to have been called first                                   |
 
-Notes:
+Notes worth keeping:
 
-- Cycles 8 and 9 use a **local** fake provider, so they are deterministic and
-  cost nothing. Prefer that shape for any future failure-path cycle.
-- Reaction names come from `config/example-emojis.yaml` when no deployment
-  `config/emojis.yaml` exists (`src/reaction-manager.ts:27-39`). Read them from
-  the same loader rather than hard-coding emoji names.
-- The bot threads replies under `event.thread_ts || event.ts`, and the session
-  key is `(userId, channelId, threadTs)`
-  (`src/sessions/session-manager.ts:37`). So poll `conversations.replies` on the
-  driver message's own `ts`, and drive cycle 3 by setting `thread_ts` to it.
-- Model fallback (`OpusHealthMonitor`) is reachable by having the fake provider
-  return an `overloaded_error`. If the fallback path turns out to need internals
-  the harness cannot reach from outside, **record it as a documented gap in the
-  report rather than weakening the assertion**.
-- Check whether the OpenAI MCP adapter (`src/runtimes/openai/mcp-adapter.ts`)
-  actually supports stdio servers on the installed `@openai/agents` version
-  before assuming cycle 5 is symmetric across providers. If it is not, report it
-  as a gap; do not fake it.
+- **Cancellation asserts the real contract.** An earlier version asserted the
+  reply carried the _second_ message's marker and failed against correct
+  behaviour: coalescing folds both messages into one query, so which instruction
+  the model follows is its choice, not a product guarantee.
+- **The failure endpoint returns 401, not 500.** Both SDKs retry a 500 with
+  backoff, which kept the turn in flight past any sane timeout with the user
+  seeing nothing. An auth failure is terminal.
+- **Wording matters.** Asking the bot to remember a "token" or "secret" makes
+  the model refuse on security grounds — correct behaviour worth keeping, so the
+  cycle asks about a neutral reference code instead.
 
 ---
 
-## 6. Required `src` seams
+## 6. Seams this depends on
 
-Three changes. Each is a testability seam that stands on its own merit — none is
-a test-only code path.
+Four changes, each standing on its own merit rather than existing only for tests:
 
-1. **Extract `src/app.ts` exporting `createApp()`; reduce `src/index.ts` to the
-   CLI entry.** All wiring is currently trapped inside a ~130-line `start()`, so
-   nothing but the CLI can boot the app. `agent-host.ts` needs an importable
-   factory.
-2. **`new McpManager(process.env.MCP_CONFIG_PATH ?? "./mcp-servers.json")`.** The
-   constructor already accepts a path (`src/mcp-manager.ts:137`); `index.ts` just
-   never passes one. Without this the harness must clobber the developer's real
-   `mcp-servers.json`.
-3. **`CUSTOM_ACTIONS_DIR` override in `src/custom-actions/loader.ts`.** The
-   loader hard-skips `example-*` files, and `.gitignore` permits _only_
-   `example-*` in `config/custom-actions/`. There is otherwise no way to land a
-   fixture action without gitignore surgery or overwriting deployment config.
+1. **`src/app.ts` exporting `createApp()`**, with `src/index.ts` reduced to the
+   CLI entry. All wiring was trapped inside a ~130-line `start()`.
+2. **`MCP_CONFIG_PATH`** honoured by `McpManager`'s constructor default, so a
+   harness need not clobber the deployment's `mcp-servers.json`.
+3. **`CUSTOM_ACTIONS_DIR`** honoured by `src/custom-actions/loader.ts`. The
+   loader hard-skips `example-*`, and `.gitignore` permits only `example-*` in
+   `config/custom-actions/`, so there was otherwise no way to land a fixture
+   action.
+4. **`src/slack-bolt.d.ts` extended** with `stop` and `processEvent`. That file
+   is a deliberately minimal stub that shadows Bolt's real types and says
+   "Extend as needed".
 
-Keep each behind existing defaults so production behaviour is unchanged.
-
----
-
-## 7. Testing discipline
-
-The harness is code, and it must not rot silently.
-
-- Pure modules (`nonce`, `payloads`, `matchers`, `report`) are written
-  test-first: failing test, minimum implementation, then generalise. Mutation-check
-  each new test — disable the behaviour it guards, watch **that** test fail,
-  revert. A test that passes either way is not coverage.
-- Add `<rootDir>/e2e` to `jest.config.js` `roots` so `e2e/**/*.test.ts` runs in
-  normal CI. `testMatch` is `**/*.test.ts`, so the live cycle files are not
-  picked up. This is what stops the harness from decaying between live runs.
-- The three §6 seams get unit tests for the override behaviour and its default.
-- Live cycles never run under Jest — `src/test-support/offline-guard.ts` would
-  block them, and correctly so.
+`config/tool-allowlist.yaml` has no environment override, so the harness writes
+it into `config/` and restores it on teardown, capturing any original first.
 
 ---
 
-## 8. Safety rails
+## 7. Defects this found
 
-Non-negotiable:
+Both were found on the first live run, and neither was reachable from the unit
+tests. Fixed, with tests that fail without the fix.
 
-- Refuse to run unless `E2E_LIVE=1`.
-- Refuse any channel other than `E2E_SLACK_CHANNEL_ID`, and refuse if its name
-  does not contain `test`.
-- Never print a token, an Authorization header, or raw provider payloads. Follow
-  the existing precedent in `scripts/openai-smoke.ts`, which logs `error.name`
-  only.
-- Delete every message the run created, on success **and** on failure. A failed
-  run must not leave the channel dirty.
-- Back up and restore — or refuse to overwrite — any deployment config the run
-  materialises.
-- Bound the run: a hard cycle cap and a per-cycle timeout, so a hung turn cannot
-  spend money indefinitely.
+**Null config maps.** `config/example-channels.yaml` ships
+`ephemeralChannelConfig` and `dmNotificationConfig` with every entry commented
+out, so js-yaml parses them as `null`. `shouldUseEphemeralMessaging` evaluated
+`channelId in null` and threw — and the error handler re-entered the same path,
+so the turn died with no reply at all. The existing tests mocked those keys as
+`{}` and could not see it. Now normalised at the load boundary, and guarded by a
+test that reads the shipped example file rather than a fixture.
+
+**Missing tool allowlist.** `config/tool-allowlist.yaml` had no example fallback,
+unlike its siblings, so a missing file threw ENOENT inside the Claude streaming
+path; it retried three times and answered "Something went wrong". It now fails
+closed with a warning. Deliberately _no_ fallback to the example file: an
+allowlist grants permissions, so adopting the template's grants because nobody
+wrote one would hand out tools no operator chose.
 
 ---
 
-## 9. Definition of Done
+## 8. Known limits
 
-Machine-checkable:
+State these in any report; they bound what a green run means.
+
+- **The driver is app-attributed.** `SLACK_MCP_XOXP_TOKEN` is a user token
+  belonging to this same Slack app, so Slack stamps `bot_id` and `app_id` on
+  everything it posts, and `as_user` does not change that. `SlackHandler`
+  therefore treats driver messages as bot messages and ignores them unless the
+  bot is explicitly mentioned. Consequences:
+  - Every driver message @-mentions the bot. This is applied in `say()` rather
+    than per cycle, so a new cycle cannot forget it and misread the resulting
+    silence as a product bug.
+  - The role resolves through `getHighestRole()` rather than
+    `UserUtils.getUserRole`, so the fixture allowlist uses a single role.
+  - **Not covered:** the plain-human-message paths — conditional-reply channels
+    and proactive smart reply. A second Slack app would not help; the
+    attribution is inherent to granular-scope apps.
+- **Button delivery is not covered** (§4.2).
+- **A failing provider is slow to surface.** Measured at roughly 200 seconds
+  against a failing Anthropic endpoint before the user is told anything. The
+  cycle passes because the error does eventually arrive, but a turn timeout
+  would be a real improvement.
+- **File-upload cycles are absent.** They need `files:read` on the bot (now
+  present) and `files:write` on the driver token (still absent).
+
+---
+
+## 9. Testing discipline
+
+- Pure modules (`markers`, `block-actions`, `report`, `phase-env`, `config`
+  flags, `deployment-config`, `slack` predicates) are written test-first and
+  mutation-checked: disable the behaviour the test guards, watch **that** test
+  fail, revert. One test here passed with its behaviour removed and had to be
+  rewritten — an unmutated test is a green light with no bulb in it.
+- `<rootDir>/e2e` is in `jest.config.js` roots so harness logic runs in normal
+  CI. Live cycle files are not `*.test.ts` and are never picked up.
+- Live cycles never run under Jest; the offline guard would block them, correctly.
+
+---
+
+## 10. Safety rails
+
+- Refuses to run unless `E2E_LIVE=1`.
+- Refuses any channel whose name does not contain `test`, or that the bot is not
+  a member of.
+- Never prints a token, an Authorization header, or a raw provider payload.
+- Deletes every message it created, on success and on failure, and on SIGINT.
+- Captures and restores any deployment config it writes.
+- Bounded per-cycle timeouts; only `provider-error` raises its own, and says why.
+
+---
+
+## 11. Definition of Done
 
 ```bash
-pnpm test                 # 509+ existing tests plus new e2e/ unit tests, all green
-npx tsc --noEmit          # clean
-E2E_LIVE=1 pnpm e2e:live  # exit 0, full matrix green
+pnpm test                                  # unit suite, including e2e/ pure logic
+pnpm typecheck                             # tsc -p tsconfig.test.json --noEmit
+E2E_LIVE=1 pnpm e2e:live --channel C0BRUSM9M4P
 ```
 
-Plus:
+The live run must exit 0 with the full matrix green. Plus:
 
-- `e2e/report/<runId>.json` exists and records per-cycle status, provider,
-  duration, and any documented gap.
+- `e2e/report/<runId>.json` records per-cycle status, provider, duration and
+  evidence; `e2e/report/<runId>-<phase>.log` holds the app's own output.
 - `git status` is clean after a run — no leftover fixtures, no modified
   deployment config.
-- The test channel contains no residue from the run.
-- Both §3 preconditions verify with the commands given in that section.
-- `README.md` gains a short section on running the live suite and what it costs.
+- The test channel contains no residue.
+- Both §3 preconditions verify with the commands given there.
 
 ---
 
-## 10. Out of scope
+## 12. Runbook
 
-- File-upload cycles. They need `files:read` on the bot and `files:write` on the
-  driver token; the driver token has neither. Add later with the scopes.
-- Real browser-driven Slack UI interaction. The only thing needing it is
-  verifying Slack's own delivery of a button click; that stays a one-time manual
-  check (§4.2).
-- Running this in shared CI. It needs live credentials and spends provider money.
-  It is a local and pre-release gate.
+```bash
+E2E_LIVE=1 pnpm e2e:live --channel C0BRUSM9M4P                 # full matrix
+E2E_LIVE=1 pnpm e2e:live --channel C… --provider openai        # one runtime
+E2E_LIVE=1 pnpm e2e:live --channel C… --cycle mcp-tool         # one cycle
+E2E_LIVE=1 pnpm e2e:live --channel C… --keep                   # leave messages for inspection
+```
+
+A failing cycle prints the app's own ERROR/WARN lines beneath it. The full phase
+log is in `e2e/report/`.
+
+---
+
+## 13. Out of scope
+
+- Running this in shared CI. It needs live credentials and spends provider
+  money; it is a local and pre-release gate.
+- Real browser-driven Slack UI interaction.
+- File uploads, until the driver token gains `files:write`.
