@@ -91,8 +91,11 @@ describe("MessageProcessor", () => {
     } as any;
     const processor = new MessageProcessor(registry, {} as any, channelConfig);
     const session = {
-      userId: "U1", channelId: "C1", workingDirectory: "/tmp/work",
-      providerState: {}, lastActivity: new Date(),
+      userId: "U1",
+      channelId: "C1",
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(),
     } as any;
     const permissionPolicy = {
       role: "member",
@@ -101,11 +104,70 @@ describe("MessageProcessor", () => {
     };
 
     await processor.processAgentStream(
-      "question", session, new AbortController(), runtime, undefined,
-      undefined, undefined, undefined, undefined, { permissionPolicy },
+      "question",
+      session,
+      new AbortController(),
+      runtime,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { permissionPolicy },
     );
 
     expect(requestPermissions).toEqual(permissionPolicy);
+  });
+
+  // The producer omits permissionPolicy when no MCP manager is configured or
+  // when policy preparation throws. A missing policy must not read as "no
+  // restriction" to the runtime.
+  it.each([
+    { label: "the bundle is empty", tools: {} },
+    { label: "the policy is not an object", tools: { permissionPolicy: null } },
+  ])("denies every tool by default when $label", async ({ tools }) => {
+    let requestPermissions: unknown;
+    const runtime = {
+      provider: "openai" as const,
+      stream: async function* (request: any): AsyncIterable<AgentEvent> {
+        requestPermissions = request.permissions;
+        yield { type: "terminal", outcome: "completed" };
+      },
+    };
+    const registry = new AgentRuntimeRegistry();
+    registry.register(runtime);
+    const channelConfig = {
+      isConditionalReplyChannel: jest.fn().mockResolvedValue(false),
+      shouldUseEphemeralMessaging: jest.fn().mockResolvedValue(false),
+      getEphemeralTargetUsers: jest.fn().mockResolvedValue([]),
+    } as any;
+    const processor = new MessageProcessor(registry, {} as any, channelConfig);
+    const session = {
+      userId: "U1",
+      channelId: "C1",
+      workingDirectory: "/tmp/work",
+      providerState: {},
+      lastActivity: new Date(),
+    } as any;
+
+    await processor.processAgentStream(
+      "question",
+      session,
+      new AbortController(),
+      runtime,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      tools as any,
+    );
+
+    expect(requestPermissions).toEqual({
+      role: "none",
+      allowed: [],
+      denied: [],
+    });
   });
 
   it("returns a bounded message when the runtime reaches its turn limit without text", async () => {

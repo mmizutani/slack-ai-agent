@@ -60,6 +60,16 @@ export interface EffectiveToolPolicy {
   denied?: readonly string[];
 }
 
+/**
+ * The policy a runtime receives when the producer could not resolve one. An
+ * absent policy must read as "nothing is permitted", never as "unrestricted".
+ */
+export const DENY_ALL_TOOL_POLICY: EffectiveToolPolicy = Object.freeze({
+  role: "none",
+  allowed: Object.freeze([]) as readonly string[],
+  denied: Object.freeze([]) as readonly string[],
+});
+
 export interface RuntimeToolBundle {
   [name: string]: unknown;
 }

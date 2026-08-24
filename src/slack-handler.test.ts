@@ -251,6 +251,45 @@ describe("SlackHandler", () => {
     );
   });
 
+  // The runtime must never receive "no policy" as "no restriction".
+  it("returns a deny-by-default policy when no MCP manager is configured", async () => {
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      { channel: "C456", channelType: "channel", user: "U123" },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.permissionPolicy).toEqual({
+      role: "none",
+      allowed: [],
+      denied: [],
+    });
+  });
+
+  it("keeps the deny-by-default policy when policy preparation throws", async () => {
+    (handler as any).mcpManager = {
+      getServerConfiguration: jest.fn().mockReturnValue(undefined),
+      getHighestRole: jest.fn().mockResolvedValue("member"),
+      getEffectiveToolPolicy: jest
+        .fn()
+        .mockRejectedValue(new Error("allowlist unreadable")),
+    };
+
+    const tools = await priv(handler).buildRuntimeTools(
+      "openai",
+      { channel: "C456", channelType: "channel", user: "U123" },
+      makeEvent(),
+      { workingDirectory: "/tmp/session-workspace" },
+    );
+
+    expect(tools.permissionPolicy).toEqual({
+      role: "none",
+      allowed: [],
+      denied: [],
+    });
+  });
+
   it("selects the runtime from a qualified channel model and strips its prefix", () => {
     expect(
       priv(handler).resolveEffectiveModel({ model: "openai/gpt-5.6-luna" }),

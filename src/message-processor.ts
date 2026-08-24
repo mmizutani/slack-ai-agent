@@ -1,4 +1,9 @@
-import { AgentEvent, AgentRunRequest, RuntimeToolBundle } from "./agent/events";
+import {
+  AgentEvent,
+  AgentRunRequest,
+  DENY_ALL_TOOL_POLICY,
+  RuntimeToolBundle,
+} from "./agent/events";
 import { AgentRuntime } from "./agent/runtime";
 import { AgentRuntimeRegistry } from "./runtimes/registry";
 import { ModelRef } from "./agent/model";
@@ -173,11 +178,12 @@ export class MessageProcessor {
       fast: requestMode?.fast,
       signal: abortController.signal,
       maxTurns: 400,
+      // A missing policy is deny-by-default, not unrestricted.
       permissions:
         runtimeTools.permissionPolicy &&
         typeof runtimeTools.permissionPolicy === "object"
           ? (runtimeTools.permissionPolicy as AgentRunRequest["permissions"])
-          : {},
+          : DENY_ALL_TOOL_POLICY,
       tools: runtimeTools,
       metadata: {
         requestId: `${sessionKey ?? "session"}:${Date.now()}`,
@@ -273,10 +279,7 @@ export class MessageProcessor {
 
       if (event.type === "session_update") {
         session.providerState[event.state.provider] = event.state;
-        if (
-          event.state.provider === "anthropic" &&
-          event.state.sessionId
-        ) {
+        if (event.state.provider === "anthropic" && event.state.sessionId) {
           session.sessionId = event.state.sessionId;
         }
         continue;

@@ -30,7 +30,7 @@ import {
 } from "./types";
 import { SessionManager } from "./sessions/session-manager";
 import { AgentRuntimeRegistry } from "./runtimes/registry";
-import type { RuntimeToolBundle } from "./agent/events";
+import { DENY_ALL_TOOL_POLICY, type RuntimeToolBundle } from "./agent/events";
 import { ModelRef, tryParseModelRef } from "./agent/model";
 import type { CustomActionRegistry } from "./custom-actions";
 import { McpManager } from "./mcp-manager";
@@ -1412,6 +1412,10 @@ export class SlackHandler {
     if (provider !== "openai") return {};
     const tools: RuntimeToolBundle = {
       workspaceTools: buildWorkspaceTools(session.workingDirectory),
+      // Deny by default. Every path below either replaces this with a resolved
+      // policy or leaves it in place — the runtime must never be handed a
+      // bundle whose missing policy reads as "no restriction".
+      permissionPolicy: DENY_ALL_TOOL_POLICY,
     };
     const injectAllActions =
       slackContext.channelType === "im" ||
