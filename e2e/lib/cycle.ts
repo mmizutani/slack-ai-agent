@@ -1,4 +1,5 @@
 import type { HarnessConfig } from "./config";
+import type { FixtureSet } from "./fixtures";
 import type { AgentHost } from "./host";
 import type { ProviderId } from "./report";
 import { markerFor } from "./markers";
@@ -54,6 +55,14 @@ export interface CycleContext {
   track(trace: Trace): void;
   /** Log output produced since the cycle started. */
   logsSinceStart(): string;
+  /**
+   * Requests the failing endpoint received, for cycles that use one. Lets a
+   * cycle distinguish "the provider failed as intended" from "the base URL
+   * override never took effect", which otherwise look identical: silence.
+   */
+  fakeProviderHits?(): number;
+  /** Fixture configuration installed for this run, for the tool cycles. */
+  fixtures?: FixtureSet;
 }
 
 export type CycleOutcome = void | { gap?: string; evidence?: string };
@@ -62,6 +71,17 @@ export interface Cycle {
   id: string;
   /** One line, shown in the report. */
   describe: string;
+  /**
+   * Run this cycle on a host whose provider base URL points at a local
+   * endpoint that fails every request. Such cycles need their own host,
+   * because the override is process-wide.
+   */
+  needsFakeProvider?: boolean;
+  /**
+   * Per-cycle reply budget. Only set it where the app is legitimately slower
+   * than the default, so one slow path does not hide regressions in the rest.
+   */
+  timeoutMs?: number;
   run(ctx: CycleContext): Promise<CycleOutcome>;
 }
 
@@ -84,8 +104,12 @@ export function makeContext(options: {
   provider: ProviderId;
   cycleId: string;
   track: (trace: Trace) => void;
+  fakeProviderHits?: () => number;
+  fixtures?: FixtureSet;
+  timeoutMs?: number;
 }): CycleContext {
   const { config, host, provider, cycleId, track } = options;
+  const defaultTimeoutMs = options.timeoutMs ?? config.cycleTimeoutMs;
   const startMark = host.mark();
 
   const awaitBotReply = async ({
@@ -104,12 +128,12 @@ export function makeContext(options: {
             (match ? match(message) : true),
         );
       },
-      { timeoutMs: timeoutMs ?? config.cycleTimeoutMs },
+      { timeoutMs: timeoutMs ?? defaultTimeoutMs },
     );
 
     if (!found) {
       throw new CycleFailure(
-        `no matching bot reply in ${channel}/${rootTs} within ${timeoutMs ?? config.cycleTimeoutMs}ms`,
+        `no matching bot reply in ${channel}/${rootTs} within ${timeoutMs ?? defaultTimeoutMs}ms`,
       );
     }
     track({ channel, ts: found.ts, as: "bot" });
@@ -133,6 +157,10 @@ export function makeContext(options: {
     awaitBotReply,
     track,
     logsSinceStart: () => host.logsSince(startMark),
+    ...(options.fakeProviderHits
+      ? { fakeProviderHits: options.fakeProviderHits }
+      : {}),
+    ...(options.fixtures ? { fixtures: options.fixtures } : {}),
   };
 }
 

@@ -162,10 +162,18 @@ export async function pollUntil<T>(
   }
 }
 
-/** True when the message was authored by the app rather than a human. */
+/**
+ * True when the message is the bot's own reply.
+ *
+ * Identity is the bot's user id, never the presence of `bot_id`. The harness
+ * drives Slack with a user token belonging to this same app, so Slack stamps
+ * `bot_id` and `app_id` on the driver's messages too. Treating any `bot_id` as
+ * "the bot replied" let a cycle match the message it had just posted itself,
+ * and pass without the bot ever answering.
+ */
 export function isBotMessage(
   message: SlackMessage,
   botUserId: string,
 ): boolean {
-  return message.user === botUserId || Boolean(message.bot_id);
+  return message.user === botUserId;
 }

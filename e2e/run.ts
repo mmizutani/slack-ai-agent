@@ -31,8 +31,25 @@ import { channelMention } from "./cycles/channel-mention";
 import { dm } from "./cycles/dm";
 import { threadContinuity } from "./cycles/thread-continuity";
 import { reactions } from "./cycles/reactions";
+import { cancellation } from "./cycles/cancellation";
+import { providerError } from "./cycles/provider-error";
+import { workspaceTool } from "./cycles/workspace-tool";
+import { mcpTool } from "./cycles/mcp-tool";
+import { buttonApproval } from "./cycles/button-approval";
+import { startFakeProvider } from "./fixtures/fake-provider-server";
+import { installFixtures, type FixtureSet } from "./lib/fixtures";
 
-const CYCLES: Cycle[] = [channelMention, dm, threadContinuity, reactions];
+const CYCLES: Cycle[] = [
+  channelMention,
+  dm,
+  threadContinuity,
+  reactions,
+  workspaceTool,
+  mcpTool,
+  buttonApproval,
+  cancellation,
+  providerError,
+];
 
 const REPORT_DIR = path.resolve(__dirname, "report");
 
@@ -54,11 +71,30 @@ async function runPhase(
   provider: ProviderId,
   cycles: readonly Cycle[],
   track: (trace: Trace) => void,
+  options: {
+    providerBaseUrl?: string;
+    fakeProviderHits?: () => number;
+    fixtures?: FixtureSet;
+  } = {},
 ): Promise<CycleResult[]> {
   const results: CycleResult[] = [];
+  const label = options.providerBaseUrl
+    ? `${provider}-failing-provider`
+    : `${provider}-phase`;
   const host = await AgentHost.start({
-    label: `${provider}-phase`,
-    env: phaseEnv(process.env, { provider }),
+    label,
+    env: phaseEnv(process.env, {
+      provider,
+      ...(options.providerBaseUrl
+        ? { providerBaseUrl: options.providerBaseUrl }
+        : {}),
+      ...(options.fixtures
+        ? {
+            mcpConfigPath: options.fixtures.mcpConfigPath,
+            customActionsDir: options.fixtures.customActionsDir,
+          }
+        : {}),
+    }),
   });
 
   try {
@@ -82,6 +118,11 @@ async function runPhase(
         provider,
         cycleId: cycle.id,
         track,
+        ...(options.fakeProviderHits
+          ? { fakeProviderHits: options.fakeProviderHits }
+          : {}),
+        ...(options.fixtures ? { fixtures: options.fixtures } : {}),
+        ...(cycle.timeoutMs ? { timeoutMs: cycle.timeoutMs } : {}),
       });
       try {
         const outcome: CycleOutcome = await cycle.run(ctx);
@@ -121,7 +162,7 @@ async function runPhase(
   } finally {
     fs.mkdirSync(REPORT_DIR, { recursive: true });
     fs.writeFileSync(
-      path.join(REPORT_DIR, `${config.runId}-${provider}.log`),
+      path.join(REPORT_DIR, `${config.runId}-${label}.log`),
       host.logs(),
     );
     await host.stop();
@@ -142,11 +183,16 @@ async function main(): Promise<void> {
     `run ${config.runId} → #${config.channelName} (${config.channelId})  providers: ${config.providers.join(", ")}  cycles: ${cycles.map(c => c.id).join(", ")}`,
   );
 
+  // Installed for the whole run: the tool allowlist has no environment
+  // override and must be written into config/, so it is put back on teardown.
+  const fixtures = await installFixtures(config.runId);
+
   const results: CycleResult[] = [];
   let teardownDone = false;
   const teardown = async (): Promise<void> => {
     if (teardownDone) return;
     teardownDone = true;
+    await fixtures.cleanUp();
     if (config.keep) {
       console.log(`\n--keep: left ${traces.length} messages in Slack`);
       return;
@@ -161,8 +207,30 @@ async function main(): Promise<void> {
   });
 
   try {
+    const normal = cycles.filter(c => !c.needsFakeProvider);
+    const failing = cycles.filter(c => c.needsFakeProvider);
+
     for (const provider of config.providers) {
-      results.push(...(await runPhase(config, provider, cycles, track)));
+      if (normal.length) {
+        results.push(
+          ...(await runPhase(config, provider, normal, track, { fixtures })),
+        );
+      }
+      if (failing.length) {
+        // Its own host: the base URL override is process-wide, so it cannot
+        // share a process with cycles that need the provider to work.
+        const fake = await startFakeProvider();
+        try {
+          results.push(
+            ...(await runPhase(config, provider, failing, track, {
+              providerBaseUrl: fake.url,
+              fakeProviderHits: fake.hits,
+            })),
+          );
+        } finally {
+          await fake.close();
+        }
+      }
     }
   } finally {
     await teardown();
