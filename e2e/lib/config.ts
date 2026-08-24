@@ -71,6 +71,19 @@ export function parseFlags(argv: readonly string[]): Flags {
   return flags;
 }
 
+/** Re-label an API failure as a preflight problem, keeping Slack's reason. */
+async function asPreflight<T>(
+  call: () => Promise<T>,
+  explanation: string,
+): Promise<T> {
+  try {
+    return await call();
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "unknown error";
+    throw new PreflightError(`${explanation} (${reason})`);
+  }
+}
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) throw new PreflightError(`${name} is not set in .env`);
@@ -110,8 +123,17 @@ export async function resolveConfig(
   const bot = new SlackApi(botToken);
   const driver = new SlackApi(driverToken);
 
-  const botIdentity = await bot.authTest();
-  const driverIdentity = await driver.authTest();
+  // Preflight failures must read as preflight, not as a stack trace. An agent
+  // running this unattended has to be able to tell "I pointed it at the wrong
+  // channel" from "the harness is broken".
+  const botIdentity = await asPreflight(
+    () => bot.authTest(),
+    "the bot token (CC_SLACK_BOT_TOKEN) was rejected by Slack",
+  );
+  const driverIdentity = await asPreflight(
+    () => driver.authTest(),
+    "the driver token (SLACK_MCP_XOXP_TOKEN) was rejected by Slack",
+  );
 
   if (botIdentity.team_id !== driverIdentity.team_id) {
     throw new PreflightError(
@@ -119,7 +141,10 @@ export async function resolveConfig(
     );
   }
 
-  const channel = await bot.channelInfo(channelId);
+  const channel = await asPreflight(
+    () => bot.channelInfo(channelId),
+    `the bot cannot read channel ${channelId} — check the id, that the bot is a member, and that it holds channels:read`,
+  );
   const channelName = channel.name ?? "";
 
   // The harness posts, reacts and deletes. Pointing it at a working channel
