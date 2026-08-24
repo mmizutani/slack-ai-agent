@@ -12,13 +12,17 @@ export interface OpenAITextClassifierOptions {
   runner?: Pick<Runner, "run">;
   apiKey?: string;
   baseUrl?: string;
+  storeResponses?: boolean;
 }
 
 /** One-turn OpenAI classifier backend with no tools or session continuation. */
 export class OpenAITextClassifierBackend implements TextClassifierBackend {
   private readonly runner: Pick<Runner, "run">;
+  private readonly storeResponses: boolean;
 
   constructor(options: OpenAITextClassifierOptions = {}) {
+    this.storeResponses =
+      options.storeResponses ?? config.openai.storeResponses;
     this.runner =
       options.runner ??
       createOpenAIRunner(
@@ -39,6 +43,9 @@ export class OpenAITextClassifierBackend implements TextClassifierBackend {
       instructions:
         "Classify the input according to the caller's instructions and return only the requested answer.",
       model: options.model.model,
+      // The Agent stores Responses when this is omitted, which would retain
+      // classifier transcripts in a deployment that opted out.
+      modelSettings: { store: this.storeResponses },
       tools: [],
     });
     const stream = await this.runner.run(agent, input, {

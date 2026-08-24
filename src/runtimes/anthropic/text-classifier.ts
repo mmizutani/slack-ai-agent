@@ -23,24 +23,26 @@ async function defaultQuery(
   // Keep the ESM-only provider SDK inside its provider adapter.
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   // @ts-ignore – eval is intentional so the shared classifier stays provider-neutral
-  const { query } = await eval(
-    'import("@anthropic-ai/claude-agent-sdk")',
-  );
+  const { query } = await eval('import("@anthropic-ai/claude-agent-sdk")');
   return query(options);
 }
 
 /** One-turn Anthropic classifier backend with no tools or session continuation. */
 export class AnthropicTextClassifierBackend implements TextClassifierBackend {
-  constructor(private readonly query: AnthropicClassifierQuery = defaultQuery) {}
+  constructor(
+    private readonly query: AnthropicClassifierQuery = defaultQuery,
+  ) {}
 
   async classify(
     input: string,
     options: TextClassifierRequest & { tools: never[]; continuation: false },
   ): Promise<TextClassifierResult> {
+    // Already cancelled: return before spawning the provider CLI, which would
+    // otherwise start and immediately be torn down.
+    if (options.signal.aborted) return { text: "" };
     const abortController = new AbortController();
     const abort = () => abortController.abort();
-    if (options.signal.aborted) abort();
-    else options.signal.addEventListener("abort", abort, { once: true });
+    options.signal.addEventListener("abort", abort, { once: true });
     try {
       const generator = await this.query({
         prompt: input,

@@ -50,6 +50,44 @@ describe("OpenAI subagent adapter", () => {
     ]);
   });
 
+  // action__/mcp__ server segments may contain underscores. A greedy [^_]+
+  // segment fails to match those names at all, so the tool resolves to no
+  // identity and is silently dropped from the child agent.
+  it("matches an action tool whose server segment contains underscores", () => {
+    const definition: SubagentDefinition = {
+      name: "filer",
+      description: "File",
+      instructions: "File tickets",
+      tools: ["action:release_ops/create_ticket"],
+    };
+    const createAgent = jest.fn((config: any) => ({
+      ...config,
+      asTool: jest.fn(() => ({ type: "function", name: "subagent__filer" })),
+    }));
+
+    buildOpenAISubagentTools(
+      [definition],
+      { allowed: ["action:release_ops/create_ticket"], denied: [] },
+      {
+        availableTools: [
+          { name: "action__release_ops__create_ticket" } as any,
+          { name: "action__release_ops__delete_ticket" } as any,
+        ],
+        createAgent: createAgent as any,
+      },
+    );
+
+    expect(createAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        tools: [
+          expect.objectContaining({
+            name: "action__release_ops__create_ticket",
+          }),
+        ],
+      }),
+    );
+  });
+
   it("does not expose an unapproved requested tool", () => {
     const definition: SubagentDefinition = {
       name: "searcher",

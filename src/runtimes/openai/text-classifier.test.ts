@@ -2,6 +2,32 @@ import type { ModelRef } from "../../agent/model";
 import { OpenAITextClassifierBackend } from "./text-classifier";
 
 describe("OpenAITextClassifierBackend", () => {
+  // A deployment that opts out of Responses storage must not have its
+  // classifier transcripts retained: the Agent stores by default when the
+  // setting is omitted.
+  it("forwards the configured response-storage policy to the model", async () => {
+    const stream = Object.assign((async function* () {})(), {
+      finalOutput: "NO",
+      currentTurn: 1,
+    });
+    const run = jest.fn().mockResolvedValue(stream);
+    const backend = new OpenAITextClassifierBackend({
+      runner: { run } as any,
+      storeResponses: false,
+    });
+
+    await backend.classify("classify me", {
+      model: { provider: "openai", model: "gpt-5.6-luna" },
+      signal: new AbortController().signal,
+      tools: [],
+      continuation: false,
+    });
+
+    expect(run.mock.calls[0][0].modelSettings).toEqual(
+      expect.objectContaining({ store: false }),
+    );
+  });
+
   it("runs one bounded no-tool Responses turn and returns text/usage", async () => {
     const stream = Object.assign(
       (async function* () {

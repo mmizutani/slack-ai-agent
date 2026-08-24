@@ -20,9 +20,12 @@ function toolIdentities(tool: Tool): string[] {
   if (name === "workspace_read_file") return ["workspace/read_file"];
   if (name === "workspace_list_files") return ["workspace/list_files"];
   if (name === "workspace_search_text") return ["workspace/search_text"];
-  const action = /^action__([^_]+)__(.+)$/.exec(name);
+  // Split on the first double underscore: a server segment may itself contain
+  // underscores (e.g. release_ops), which [^_]+ fails to match at all — the
+  // tool then resolves to no identity and is silently dropped from the child.
+  const action = /^action__(.+?)__(.+)$/.exec(name);
   if (action) return [`action:${action[1]}/${action[2]}`];
-  const mcp = /^mcp__([^_]+)__(.+)$/.exec(name);
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(name);
   if (mcp) return [`mcp:${mcp[1]}/${mcp[2]}`];
   return legacyToolIdentities(name);
 }
