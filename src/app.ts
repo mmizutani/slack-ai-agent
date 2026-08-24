@@ -2,6 +2,7 @@
 // process.env at import time.
 import { config, validateEnabledProviders } from "./config";
 import { App } from "@slack/bolt";
+import type { AgentProviderId } from "./types";
 import { ClaudeHandler } from "./claude-handler";
 import { SlackHandler } from "./slack-handler";
 import { McpManager } from "./mcp-manager";
@@ -39,6 +40,12 @@ export interface WiredApp {
   reactionManager: ReactionManager;
   customActionNames: string[];
   mcpServerNames: string[];
+  /**
+   * Providers this process actually enabled. Surfaced so a verification host
+   * can prove a single-provider phase really is single-provider, rather than
+   * trusting that the environment overlay survived `dotenv.config()`.
+   */
+  enabledProviders: AgentProviderId[];
 }
 
 /**
@@ -129,6 +136,7 @@ export async function createApp(): Promise<WiredApp> {
     reactionManager,
     customActionNames: actions.map(action => action.name),
     mcpServerNames: mcpConfig ? Object.keys(mcpConfig.mcpServers) : [],
+    enabledProviders: [...config.agent.enabledProviders],
   };
 }
 

@@ -26,9 +26,15 @@ describe("createApp", () => {
     // verification harness depends on this staying public across Bolt upgrades.
     const wired = await createApp();
 
-    expect(
-      typeof (wired.app as unknown as Record<string, unknown>).processEvent,
-    ).toBe("function");
+    expect(typeof wired.app.processEvent).toBe("function");
+  });
+
+  it("reports the providers it enabled", async () => {
+    // The verification harness asserts on this to prove a single-provider
+    // phase was not silently re-broadened by dotenv refilling a blanked key.
+    const wired = await createApp();
+
+    expect(wired.enabledProviders).toEqual(["anthropic", "openai"]);
   });
 
   it("registers a runtime for every enabled provider", async () => {
