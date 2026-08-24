@@ -22,9 +22,27 @@ const isCompiled = __filename.endsWith(".js");
 // In compiled mode, config files live at dist/config/custom-actions/ relative
 // to this file at dist/src/custom-actions/loader.js.
 // In dev mode, config files live at config/custom-actions/ relative to CWD.
-const ACTIONS_DIR = isCompiled
-  ? path.resolve(__dirname, "../../config/custom-actions")
-  : path.resolve("config/custom-actions");
+const defaultActionsDir = (): string =>
+  isCompiled
+    ? path.resolve(__dirname, "../../config/custom-actions")
+    : path.resolve("config/custom-actions");
+
+/**
+ * Directory scanned for custom actions.
+ *
+ * `CUSTOM_ACTIONS_DIR` exists so an out-of-process harness can point the bot at
+ * fixture actions without writing into `config/custom-actions/`, which is both
+ * deployment-local and gitignored except for `example-*` files that this loader
+ * deliberately skips. Resolved per call rather than at module load so a caller
+ * can set it after this module is imported.
+ *
+ * An empty value is treated as unset: `path.resolve("")` is the process cwd,
+ * which would silently scan the repository root.
+ */
+export const resolveActionsDir = (): string => {
+  const override = process.env.CUSTOM_ACTIONS_DIR;
+  return override ? path.resolve(override) : defaultActionsDir();
+};
 
 const CONFIG_EXT = isCompiled ? ".js" : ".ts";
 
@@ -34,11 +52,12 @@ const CONFIG_EXT = isCompiled ? ".js" : ".ts";
  * Files without a valid default export (e.g. utility modules) are silently skipped.
  */
 export const loadCustomActions = async (): Promise<CustomAction<any>[]> => {
-  if (!fs.existsSync(ACTIONS_DIR)) {
+  const actionsDir = resolveActionsDir();
+  if (!fs.existsSync(actionsDir)) {
     return [];
   }
 
-  const files = fs.readdirSync(ACTIONS_DIR).filter(
+  const files = fs.readdirSync(actionsDir).filter(
     f =>
       f.endsWith(CONFIG_EXT) &&
       !f.endsWith(".d.ts") &&
@@ -59,7 +78,7 @@ export const loadCustomActions = async (): Promise<CustomAction<any>[]> => {
 
   for (const file of files) {
     try {
-      const filePath = path.join(ACTIONS_DIR, file);
+      const filePath = path.join(actionsDir, file);
       const mod = await import(filePath);
       const action = mod.default;
 

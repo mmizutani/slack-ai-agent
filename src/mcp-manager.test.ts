@@ -1,4 +1,11 @@
-import { bindUserToMcpServers, McpServerConfig } from "./mcp-manager";
+import fs from "fs";
+import os from "os";
+import path from "path";
+import {
+  bindUserToMcpServers,
+  McpManager,
+  McpServerConfig,
+} from "./mcp-manager";
 
 describe("bindUserToMcpServers", () => {
   const identityBound: McpServerConfig = {
@@ -90,5 +97,51 @@ describe("bindUserToMcpServers", () => {
       url: "https://sse.example.com/sse",
       headers: { "X-User-Email": "user@example.com" },
     });
+  });
+});
+
+describe("MCP configuration path", () => {
+  const originalPath = process.env.MCP_CONFIG_PATH;
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "mcp-config-"));
+  });
+
+  afterEach(() => {
+    if (originalPath === undefined) delete process.env.MCP_CONFIG_PATH;
+    else process.env.MCP_CONFIG_PATH = originalPath;
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  it("reads the file named by MCP_CONFIG_PATH", () => {
+    const configPath = path.join(tmpDir, "harness-mcp.json");
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ mcpServers: { probe: { command: "echo" } } }),
+    );
+    process.env.MCP_CONFIG_PATH = configPath;
+
+    const config = new McpManager().loadConfiguration();
+
+    expect(Object.keys(config?.mcpServers ?? {})).toEqual(["probe"]);
+  });
+
+  it("still prefers an explicit constructor argument over the variable", () => {
+    const envPath = path.join(tmpDir, "env-mcp.json");
+    const argPath = path.join(tmpDir, "arg-mcp.json");
+    fs.writeFileSync(
+      envPath,
+      JSON.stringify({ mcpServers: { fromEnv: { command: "echo" } } }),
+    );
+    fs.writeFileSync(
+      argPath,
+      JSON.stringify({ mcpServers: { fromArg: { command: "echo" } } }),
+    );
+    process.env.MCP_CONFIG_PATH = envPath;
+
+    const config = new McpManager(argPath).loadConfiguration();
+
+    expect(Object.keys(config?.mcpServers ?? {})).toEqual(["fromArg"]);
   });
 });

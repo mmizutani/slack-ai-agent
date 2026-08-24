@@ -134,7 +134,15 @@ export class McpManager {
   } | null = null;
   private readonly CACHE_TTL_MS = CONTEXT_CACHE_TTL_MS;
 
-  constructor(configPath: string = "./mcp-servers.json") {
+  /**
+   * `MCP_CONFIG_PATH` lets an out-of-process harness point the bot at a fixture
+   * MCP configuration instead of the deployment's own `mcp-servers.json`, which
+   * is gitignored and may hold real credentials. Read as a default parameter so
+   * it is evaluated per construction, not once at module load.
+   */
+  constructor(
+    configPath: string = process.env.MCP_CONFIG_PATH || "./mcp-servers.json",
+  ) {
     this.configPath = path.resolve(configPath);
   }
 
