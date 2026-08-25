@@ -1,5 +1,5 @@
 import { expect, type Cycle } from "../lib/cycle";
-import { isBotMessage, sleep } from "../lib/slack";
+import { isBotMessage, pollUntil, sleep } from "../lib/slack";
 
 /** Grace period after the first reply, to catch a second one arriving late. */
 const SETTLE_MS = 12_000;
@@ -30,9 +30,24 @@ export const cancellation: Cycle = {
     const rootTs = await ctx.say(
       `Reply with exactly ${first} and nothing else.`,
     );
-    // Long enough for Slack to deliver the two events in order, short enough
-    // that the first turn is still in flight.
-    await sleep(400);
+
+    // Wait for the app to actually pick the first message up, rather than
+    // assuming a fixed delay is enough. A sleep that is too short sends the
+    // follow-up before there is anything in flight to cancel, and the cycle
+    // then passes or fails on machine speed. The app logs a permalink whose id
+    // is the timestamp with the dot removed.
+    const started = await pollUntil(
+      async () =>
+        ctx.logsSinceStart().includes(`p${rootTs.replace(".", "")}`)
+          ? true
+          : undefined,
+      { timeoutMs: 30_000, intervalMs: 200 },
+    );
+    expect(
+      started === true,
+      "the app never logged receipt of the first message, so there was " +
+        "nothing in flight for the follow-up to supersede",
+    );
     await ctx.say(
       `Ignore my previous message. Reply with exactly ${second} and nothing else.`,
       { threadTs: rootTs },
