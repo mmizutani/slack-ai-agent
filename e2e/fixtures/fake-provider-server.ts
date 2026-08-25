@@ -45,9 +45,16 @@ export async function startFakeProvider(
     });
   });
 
-  await new Promise<void>(resolve =>
-    server.listen(0, "127.0.0.1", () => resolve()),
-  );
+  // The error listener is attached before listen: without it a failure to bind
+  // leaves this promise pending forever, and the run hangs at startup with no
+  // diagnostic instead of failing.
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
   const { port } = server.address() as AddressInfo;
 
   return {
