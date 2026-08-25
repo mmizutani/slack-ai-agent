@@ -33,23 +33,37 @@ export async function materialise(
       : undefined,
   }));
 
-  for (const file of files) {
-    fs.mkdirSync(path.dirname(file.path), { recursive: true });
-    fs.writeFileSync(file.path, file.content);
+  let restored = false;
+
+  const putBack = (upTo: number): void => {
+    for (const original of originals.slice(0, upTo)) {
+      if (original.existed && original.content !== undefined) {
+        fs.writeFileSync(original.path, original.content);
+      } else {
+        fs.rmSync(original.path, { force: true });
+      }
+    }
+  };
+
+  // Roll back on a partial failure. Without this the caller gets a throw and no
+  // handle, so the files already overwritten stay overwritten — and these are
+  // the operator's own config, not scratch files.
+  for (const [index, file] of files.entries()) {
+    try {
+      fs.mkdirSync(path.dirname(file.path), { recursive: true });
+      fs.writeFileSync(file.path, file.content);
+    } catch (error) {
+      putBack(index);
+      restored = true;
+      throw error;
+    }
   }
 
-  let restored = false;
   return {
     restore: async () => {
       if (restored) return;
       restored = true;
-      for (const original of originals) {
-        if (original.existed && original.content !== undefined) {
-          fs.writeFileSync(original.path, original.content);
-        } else {
-          fs.rmSync(original.path, { force: true });
-        }
-      }
+      putBack(originals.length);
     },
   };
 }

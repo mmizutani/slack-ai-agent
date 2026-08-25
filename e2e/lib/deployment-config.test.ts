@@ -78,3 +78,50 @@ describe("materialise", () => {
     expect(fs.readFileSync(target, "utf-8")).toBe("edited-after-restore\n");
   });
 });
+
+describe("materialise when a write fails part way", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "deploy-config-fail-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("restores files already written before rethrowing", async () => {
+    // materialise writes into the deployment's own config directory. A failure
+    // half way through used to leave the earlier files overwritten with no
+    // handle to restore them, because the caller never received one.
+    const good = path.join(dir, "first.yaml");
+    const blocker = path.join(dir, "blocker");
+    fs.writeFileSync(good, "original\n");
+    fs.writeFileSync(blocker, "not a directory");
+    const doomed = path.join(blocker, "second.yaml");
+
+    await expect(
+      materialise([
+        { path: good, content: "replaced\n" },
+        { path: doomed, content: "never\n" },
+      ]),
+    ).rejects.toThrow();
+
+    expect(fs.readFileSync(good, "utf-8")).toBe("original\n");
+  });
+
+  it("removes a file it created before the failure", async () => {
+    const created = path.join(dir, "created.yaml");
+    const blocker = path.join(dir, "blocker2");
+    fs.writeFileSync(blocker, "not a directory");
+
+    await expect(
+      materialise([
+        { path: created, content: "new\n" },
+        { path: path.join(blocker, "x.yaml"), content: "never\n" },
+      ]),
+    ).rejects.toThrow();
+
+    expect(fs.existsSync(created)).toBe(false);
+  });
+});
