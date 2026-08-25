@@ -214,7 +214,15 @@ async function main(): Promise<void> {
 
   // A killed run must not leave the channel dirty.
   process.on("SIGINT", () => {
-    void teardown().then(() => process.exit(130));
+    // finally, not then: a teardown that rejects must still exit, or Ctrl-C
+    // leaves the run hanging with its child processes alive.
+    void teardown()
+      .catch(error => {
+        console.error(
+          `teardown failed during interrupt: ${error instanceof Error ? error.message : "unknown"}`,
+        );
+      })
+      .finally(() => process.exit(130));
   });
 
   try {

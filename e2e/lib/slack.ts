@@ -15,6 +15,17 @@ const SLACK_API = "https://slack.com/api";
 /** Attempts for a call Slack rate-limits. Teardown deletes in bursts. */
 const MAX_RATE_LIMIT_RETRIES = 5;
 
+/**
+ * Per-request ceiling.
+ *
+ * Without it a stalled connection hangs the caller indefinitely: pollUntil
+ * checks its deadline between probes, not during one, so a probe that never
+ * settles keeps the whole run alive past any cycle timeout. Bounding the
+ * request is the fix at source — racing every probe against a deadline would
+ * leave the stalled request running in the background instead of ending it.
+ */
+const REQUEST_TIMEOUT_MS = 30_000;
+
 export class SlackApiError extends Error {
   constructor(
     readonly method: string,
@@ -62,6 +73,7 @@ export class SlackApi {
           "Content-Type": "application/x-www-form-urlencoded; charset=utf-8",
         },
         body: form,
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
       });
 
       // Teardown deletes every message a run created, in a burst, and
