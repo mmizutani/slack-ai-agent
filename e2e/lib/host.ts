@@ -69,24 +69,32 @@ export class AgentHost {
       }
     });
 
-    const started = await pollUntil(
-      async () => {
-        if (fatal) throw new Error(`agent host failed to start: ${fatal}`);
-        if (host.exited) {
-          throw new Error(
-            `agent host exited during startup:\n${host.tail(2000)}`,
-          );
-        }
-        return ready ? true : undefined;
-      },
-      { timeoutMs: options.startupTimeoutMs ?? 60_000, intervalMs: 250 },
-    );
-
-    if (!started) {
-      await host.stop();
-      throw new Error(
-        `agent host did not become ready in time:\n${host.tail(2000)}`,
+    // Every failure path stops the child before rethrowing. The timeout path
+    // used to do this and the fatal path did not, which is the kind of
+    // asymmetry that leaves a stray process behind on exactly the runs where
+    // nobody is watching.
+    try {
+      const started = await pollUntil(
+        async () => {
+          if (fatal) throw new Error(`agent host failed to start: ${fatal}`);
+          if (host.exited) {
+            throw new Error(
+              `agent host exited during startup:\n${host.tail(2000)}`,
+            );
+          }
+          return ready ? true : undefined;
+        },
+        { timeoutMs: options.startupTimeoutMs ?? 60_000, intervalMs: 250 },
       );
+
+      if (!started) {
+        throw new Error(
+          `agent host did not become ready in time:\n${host.tail(2000)}`,
+        );
+      }
+    } catch (error) {
+      await host.stop();
+      throw error;
     }
     return host;
   }
@@ -129,14 +137,49 @@ export class AgentHost {
    * Resolves once the child reports the middleware chain finished, so a cycle
    * can assert on the resulting Slack side effects without racing them.
    */
-  async inject(body: Record<string, unknown>): Promise<void> {
+  async inject(
+    body: Record<string, unknown>,
+    timeoutMs = 60_000,
+  ): Promise<void> {
     if (this.exited) throw new Error("agent host is not running");
     const id = this.nextCommandId++;
-    const settled = new Promise<void>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+
+    return new Promise<void>((resolve, reject) => {
+      // Bounded, because a cycle awaits this directly rather than through
+      // awaitBotReply: a child that never replies would otherwise hang the
+      // whole run with no timeout anywhere above it.
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(
+          new Error(
+            `agent host did not acknowledge the injected payload within ${timeoutMs}ms`,
+          ),
+        );
+      }, timeoutMs);
+      timer.unref();
+
+      const finish = (act: () => void): void => {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        act();
+      };
+
+      this.pending.set(id, {
+        resolve: () => finish(resolve),
+        reject: error => finish(() => reject(error)),
+      });
+
+      // send() reports back two ways, and both were ignored: false for a
+      // closed channel, and an error through the callback.
+      const queued = this.child.send({ id, type: "inject", body }, error => {
+        if (error) finish(() => reject(error));
+      });
+      if (!queued) {
+        finish(() =>
+          reject(new Error("agent host IPC channel refused the payload")),
+        );
+      }
     });
-    this.child.send({ id, type: "inject", body });
-    return settled;
   }
 
   /** Ask the child to disconnect, then make sure it is gone. */

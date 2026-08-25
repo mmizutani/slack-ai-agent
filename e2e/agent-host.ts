@@ -50,12 +50,15 @@ async function main(): Promise<void> {
             body: command.body,
             ack: async () => undefined,
           });
-        } else if (command.type === "shutdown") {
+          send({ type: "result", id: command.id, ok: true });
+          return;
+        }
+
+        if (command.type === "shutdown") {
           await wired.app.stop().catch(() => undefined);
           send({ type: "result", id: command.id, ok: true });
           process.exit(0);
         }
-        send({ type: "result", id: command.id, ok: true });
       } catch (error) {
         send({
           type: "result",
