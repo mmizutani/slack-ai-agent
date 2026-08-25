@@ -58,9 +58,20 @@ export function parseFlags(argv: readonly string[]): Flags {
       case "--cycle":
         flags.cycles.push(next());
         break;
-      case "--timeout":
-        flags.timeoutMs = Number(next());
+      case "--timeout": {
+        // Number("abc") is NaN and Number("") is 0. Assigned straight through,
+        // a NaN deadline makes every wait expire immediately, so every cycle
+        // fails with a timeout that never actually elapsed.
+        const raw = next();
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value <= 0) {
+          throw new PreflightError(
+            `--timeout needs a positive number of milliseconds, got: ${raw}`,
+          );
+        }
+        flags.timeoutMs = value;
         break;
+      }
       case "--keep":
         flags.keep = true;
         break;
