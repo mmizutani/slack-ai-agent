@@ -166,12 +166,17 @@ async function runPhase(
       }
     }
   } finally {
-    fs.mkdirSync(REPORT_DIR, { recursive: true });
-    fs.writeFileSync(
-      path.join(REPORT_DIR, `${config.runId}-${label}.log`),
-      host.logs(),
-    );
-    await host.stop();
+    // Nested, so a failure writing the phase log cannot skip host.stop() and
+    // strand a child holding a Socket Mode connection.
+    try {
+      fs.mkdirSync(REPORT_DIR, { recursive: true });
+      fs.writeFileSync(
+        path.join(REPORT_DIR, `${config.runId}-${label}.log`),
+        host.logs(),
+      );
+    } finally {
+      await host.stop();
+    }
   }
 
   return results;
@@ -195,21 +200,52 @@ async function main(): Promise<void> {
 
   const results: CycleResult[] = [];
   let teardownDone = false;
+  let teardownFailure: string | undefined;
+
+  /**
+   * Every stage runs even when an earlier one fails, and anything left behind
+   * fails the run. Stopping at the first error used to skip Slack cleanup
+   * entirely whenever fixture restoration threw, and residue was printed but
+   * not acted on — so a run could exit 0 having left the operator's config
+   * modified and messages sitting in the channel.
+   */
   const teardown = async (): Promise<void> => {
     if (teardownDone) return;
     teardownDone = true;
-    await fixtures.cleanUp();
+    const problems: string[] = [];
+
+    try {
+      await fixtures.cleanUp();
+    } catch (error) {
+      problems.push(
+        `fixture cleanup failed: ${error instanceof Error ? error.message : "unknown"}`,
+      );
+    }
+
     if (config.keep) {
       console.log(`\n--keep: left ${traces.length} messages in Slack`);
-      return;
+    } else {
+      try {
+        const result = await cleanUp(traces, config.bot, config.driver);
+        console.log(
+          `\ncleaned up ${result.removed}/${result.attempted} messages`,
+        );
+        for (const left of result.residue) {
+          console.log(
+            `  LEFT BEHIND ${left.channel}/${left.ts}: ${left.reason}`,
+          );
+        }
+        if (result.residue.length > 0) {
+          problems.push(`${result.residue.length} message(s) left in Slack`);
+        }
+      } catch (error) {
+        problems.push(
+          `slack cleanup failed: ${error instanceof Error ? error.message : "unknown"}`,
+        );
+      }
     }
-    const result = await cleanUp(traces, config.bot, config.driver);
-    console.log(`\ncleaned up ${result.removed}/${result.attempted} messages`);
-    for (const left of result.residue) {
-      // Loud, not swallowed: a run that leaves messages behind has not
-      // finished, even if every cycle passed.
-      console.log(`  LEFT BEHIND ${left.channel}/${left.ts}: ${left.reason}`);
-    }
+
+    if (problems.length > 0) teardownFailure = problems.join("; ");
   };
 
   // A killed run must not leave the channel dirty.
@@ -265,6 +301,7 @@ async function main(): Promise<void> {
   const summary = summarize(results);
   console.log("");
   console.log(formatSummary(results, summary));
+  if (teardownFailure) console.log(`  teardown: ${teardownFailure}`);
 
   fs.mkdirSync(REPORT_DIR, { recursive: true });
   const reportPath = path.join(REPORT_DIR, `${config.runId}.json`);
@@ -277,13 +314,16 @@ async function main(): Promise<void> {
         providers: config.providers,
         results,
         summary,
+        ...(teardownFailure ? { teardownFailure } : {}),
       },
       null,
       2,
     ),
   );
   console.log(`\nreport: ${reportPath}`);
-  process.exit(summary.exitCode);
+  // A run that could not clean up after itself has not passed, however green
+  // its cycles were.
+  process.exit(teardownFailure ? 1 : summary.exitCode);
 }
 
 main().catch(error => {

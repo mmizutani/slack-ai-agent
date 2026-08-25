@@ -70,6 +70,16 @@ async function main(): Promise<void> {
     })();
   });
 
+  // If the parent dies without sending shutdown, the IPC channel closes but
+  // this process keeps its Socket Mode connection and interval timers alive —
+  // a stray bot instance still receiving Slack events with nobody watching.
+  process.on("disconnect", () => {
+    void wired.app
+      .stop()
+      .catch(() => undefined)
+      .finally(() => process.exit(0));
+  });
+
   send({ type: "ready", enabledProviders: wired.enabledProviders });
 }
 

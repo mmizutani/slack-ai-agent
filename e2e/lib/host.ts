@@ -43,6 +43,20 @@ export class AgentHost {
     });
 
     const host = new AgentHost(child, options.label);
+
+    // Declared before any listener that closes over it: an 'error' can fire
+    // synchronously on a failed spawn, and reading `fatal` from its temporal
+    // dead zone would replace a useful message with a ReferenceError.
+    let ready = false;
+    let fatal: string | undefined;
+
+    // Without an 'error' listener a spawn failure (a missing interpreter, a
+    // permissions problem) is an uncaught exception in the parent rather than
+    // a reported startup failure.
+    child.on("error", error => {
+      fatal = `child process error: ${error.message}`;
+    });
+
     child.stdout?.on("data", d => host.chunks.push(String(d)));
     child.stderr?.on("data", d => host.chunks.push(String(d)));
     child.on("exit", () => {
@@ -53,8 +67,6 @@ export class AgentHost {
       host.pending.clear();
     });
 
-    let ready = false;
-    let fatal: string | undefined;
     child.on("message", (message: any) => {
       if (message?.type === "ready") {
         host.enabled = message.enabledProviders ?? [];
