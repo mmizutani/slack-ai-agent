@@ -168,8 +168,8 @@ E2E_LIVE=1 pnpm e2e:live --channel C… --keep       # leave messages for inspec
 ```
 
 It refuses to run without `E2E_LIVE=1`, refuses any channel whose name does not
-contain `test`, deletes every message it creates, and restores any deployment
-config it had to write. Results land in `e2e/report/<runId>.json`, with the
+contain `test`, deletes every message it creates unless `--keep` is passed, and
+restores any deployment config it had to write regardless. Results land in `e2e/report/<runId>.json`, with the
 app's own output in `e2e/report/<runId>-<phase>.log`.
 
 Cost is a few cents per full run: the phases pin the cheap model tier, and the

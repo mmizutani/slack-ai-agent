@@ -342,7 +342,10 @@ State these in any report; they bound what a green run means.
 - Refuses any channel whose name does not contain `test`, or that the bot is not
   a member of.
 - Never prints a token, an Authorization header, or a raw provider payload.
-- Deletes every message it created, on success and on failure, and on SIGINT.
+- Deletes every message it created, on success and on failure, and on SIGINT —
+  unless `--keep` is passed, which leaves them in the channel deliberately for
+  inspection and says so in the run output. Deployment config is restored
+  either way.
   `chat.delete` is rate-limited and teardown deletes in a burst, so the client
   honours `Retry-After`; anything it still cannot remove is printed as
   `LEFT BEHIND`, because a run that leaves messages in the channel has not
