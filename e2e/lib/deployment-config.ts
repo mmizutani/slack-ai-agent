@@ -35,13 +35,29 @@ export async function materialise(
 
   let restored = false;
 
+  // One unrestorable file must not strand the rest. Errors are collected and
+  // reported after every entry has been attempted, because the caller needs to
+  // know that config was left modified — silently swallowing them would be a
+  // fail-open on the operator's own files.
   const putBack = (upTo: number): void => {
+    const failures: string[] = [];
     for (const original of originals.slice(0, upTo)) {
-      if (original.existed && original.content !== undefined) {
-        fs.writeFileSync(original.path, original.content);
-      } else {
-        fs.rmSync(original.path, { force: true });
+      try {
+        if (original.existed && original.content !== undefined) {
+          fs.writeFileSync(original.path, original.content);
+        } else {
+          fs.rmSync(original.path, { force: true });
+        }
+      } catch (error) {
+        failures.push(
+          `${original.path}: ${error instanceof Error ? error.message : "unknown error"}`,
+        );
       }
+    }
+    if (failures.length > 0) {
+      throw new Error(
+        `could not restore ${failures.length} file(s): ${failures.join("; ")}`,
+      );
     }
   };
 
@@ -53,7 +69,16 @@ export async function materialise(
       fs.mkdirSync(path.dirname(file.path), { recursive: true });
       fs.writeFileSync(file.path, file.content);
     } catch (error) {
-      putBack(index);
+      try {
+        putBack(index);
+      } catch (restoreError) {
+        // Surface both: the write failure explains why, the restore failure
+        // says what was left behind.
+        restored = true;
+        throw new Error(
+          `${error instanceof Error ? error.message : "write failed"} (and rollback failed: ${restoreError instanceof Error ? restoreError.message : "unknown"})`,
+        );
+      }
       restored = true;
       throw error;
     }

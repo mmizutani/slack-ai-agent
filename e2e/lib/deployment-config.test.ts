@@ -125,3 +125,36 @@ describe("materialise when a write fails part way", () => {
     expect(fs.existsSync(created)).toBe(false);
   });
 });
+
+describe("materialise when a restore fails", () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "deploy-config-restore-"));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("restores the remaining files and reports the failure", async () => {
+    // One unrestorable file must not strand the others: the operator's other
+    // config would silently stay overwritten while the run reported nothing.
+    const blocked = path.join(dir, "blocked.yaml");
+    const other = path.join(dir, "other.yaml");
+    fs.writeFileSync(blocked, "blocked-original\n");
+    fs.writeFileSync(other, "other-original\n");
+
+    const handle = await materialise([
+      { path: blocked, content: "tmp-a\n" },
+      { path: other, content: "tmp-b\n" },
+    ]);
+
+    // Make writing back to the first path impossible.
+    fs.rmSync(blocked);
+    fs.mkdirSync(blocked);
+
+    await expect(handle.restore()).rejects.toThrow(/could not restore/);
+    expect(fs.readFileSync(other, "utf-8")).toBe("other-original\n");
+  });
+});
