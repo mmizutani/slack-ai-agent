@@ -27,7 +27,7 @@ describe("channel config loaded from the shipped example file", () => {
     const manager = new ChannelConfigManager();
 
     await expect(
-      manager.shouldUseEphemeralMessaging("C0BRUSM9M4P"),
+      manager.shouldUseEphemeralMessaging("C0EXAMPLE01"),
     ).resolves.toBe(false);
   });
 
@@ -35,7 +35,7 @@ describe("channel config loaded from the shipped example file", () => {
     const manager = new ChannelConfigManager();
 
     await expect(
-      manager.getEphemeralTargetUsers("C0BRUSM9M4P"),
+      manager.getEphemeralTargetUsers("C0EXAMPLE01"),
     ).resolves.toEqual([]);
   });
 
@@ -43,7 +43,7 @@ describe("channel config loaded from the shipped example file", () => {
     const manager = new ChannelConfigManager();
 
     await expect(
-      manager.getEphemeralTargetChannels("C0BRUSM9M4P"),
+      manager.getEphemeralTargetChannels("C0EXAMPLE01"),
     ).resolves.toEqual([]);
   });
 
@@ -51,7 +51,7 @@ describe("channel config loaded from the shipped example file", () => {
     const manager = new ChannelConfigManager();
 
     await expect(
-      manager.shouldSendDM("C0BRUSM9M4P", "U1LBQTL8G"),
+      manager.shouldSendDM("C0EXAMPLE01", "U0EXAMPLE01"),
     ).resolves.toBe(false);
   });
 });

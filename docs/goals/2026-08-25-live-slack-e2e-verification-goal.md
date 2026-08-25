@@ -49,16 +49,19 @@ invisible to the existing tests. They are described in §7.
 
 ## 2. Workspace binding
 
-Live values for this deployment. The harness reads them from the environment or
-derives them; nothing is hard-coded in `src/` or `e2e/`.
+The harness reads these from the environment or derives them at runtime;
+nothing is hard-coded in `src/` or `e2e/`. This repository is public, so the
+deployment's own identifiers are deliberately **not** recorded here — they name
+a workspace, an app, and a person. Read them from `.env` and `auth.test` when
+you need them.
 
-| Thing           | Value                                  | How the harness gets it                    |
-| --------------- | -------------------------------------- | ------------------------------------------ |
-| Slack workspace | `watervalley` / `T1LBJN3D2`            | `auth.test`                                |
-| Test channel    | `#slack-ai-agent-test` / `C0BRUSM9M4P` | `--channel` flag or `E2E_SLACK_CHANNEL_ID` |
-| Bot user        | `codepilot` / `U0BQUP1M6ER`            | `auth.test` with the bot token             |
-| Slack App       | `A0BQS7CTWR1`                          | —                                          |
-| Driver identity | `minoru` / `U1LBQTL8G`                 | `auth.test` with the user token            |
+| Thing           | How the harness gets it                    |
+| --------------- | ------------------------------------------ |
+| Slack workspace | `auth.test`                                |
+| Test channel    | `--channel` flag or `E2E_SLACK_CHANNEL_ID` |
+| Bot user        | `auth.test` with the bot token             |
+| Slack App       | the app settings URL for your installation |
+| Driver identity | `auth.test` with the user token            |
 
 Only the channel needs configuring. Credentials already in `.env` (names only —
 never print values):
@@ -90,17 +93,17 @@ were missing, so `conversations.info` returned `missing_scope` and
 processed as a DM, skipping the conditional-reply branch and applying DM privacy
 redaction. The reply still arrived, so only a log assertion catches it.
 
-Add scopes at `https://api.slack.com/apps/A0BQS7CTWR1` → _OAuth & Permissions_ →
+Add scopes at `https://api.slack.com/apps/<your-app-id>` → _OAuth & Permissions_ →
 _Reinstall to Workspace_. Verify:
 
 ```bash
 set -a; . ./.env; set +a
 curl -s -H "Authorization: Bearer $CC_SLACK_BOT_TOKEN" \
-  "https://slack.com/api/conversations.info?channel=C0BRUSM9M4P" \
+  "https://slack.com/api/conversations.info?channel=$E2E_SLACK_CHANNEL_ID" \
   | python3 -c 'import sys,json;d=json.load(sys.stdin);print(d.get("ok"), d.get("error"), (d.get("channel") or {}).get("name"))'
 ```
 
-Required: `True None slack-ai-agent-test`. Reinstalling did **not** rotate the
+Required: `True None <your-test-channel>`. Reinstalling did **not** rotate the
 bot token in this workspace, but check `auth.test` afterwards rather than
 assuming.
 
@@ -360,7 +363,7 @@ State these in any report; they bound what a green run means.
 ```bash
 pnpm test                                  # unit suite, including e2e/ pure logic
 pnpm typecheck                             # tsc -p tsconfig.test.json --noEmit
-E2E_LIVE=1 pnpm e2e:live --channel C0BRUSM9M4P
+E2E_LIVE=1 pnpm e2e:live --channel C0123456789
 ```
 
 The live run must exit 0 with the full matrix green. Plus:
@@ -377,7 +380,7 @@ The live run must exit 0 with the full matrix green. Plus:
 ## 12. Runbook
 
 ```bash
-E2E_LIVE=1 pnpm e2e:live --channel C0BRUSM9M4P                 # full matrix
+E2E_LIVE=1 pnpm e2e:live --channel C0123456789                 # full matrix
 E2E_LIVE=1 pnpm e2e:live --channel C… --provider openai        # one runtime
 E2E_LIVE=1 pnpm e2e:live --channel C… --cycle mcp-tool         # one cycle
 E2E_LIVE=1 pnpm e2e:live --channel C… --keep                   # leave messages for inspection
