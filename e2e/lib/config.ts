@@ -95,6 +95,25 @@ async function asPreflight<T>(
   }
 }
 
+/**
+ * Channel names this suite is allowed to be destructive in.
+ *
+ * "test" must appear as its own word. A substring check accepts
+ * `latest-releases`, `protest-planning` and `greatest-hits` — `"latest"`
+ * literally contains `"test"` — and this guard is the only thing standing
+ * between a mistyped channel id and a run that posts to, reacts to and then
+ * deletes from a real channel.
+ *
+ * Set `E2E_SLACK_CHANNEL_ALLOWLIST` to a comma-separated list of channel ids
+ * to replace this heuristic with an explicit allowlist, for workspaces whose
+ * disposable channel is not named for it.
+ */
+const DISPOSABLE_CHANNEL = /(?:^|[-_])tests?(?:ing)?(?:[-_]|$)/;
+
+export function isDisposableChannelName(name: string | undefined): boolean {
+  return !!name && DISPOSABLE_CHANNEL.test(name);
+}
+
 function required(name: string): string {
   const value = process.env[name];
   if (!value) throw new PreflightError(`${name} is not set in .env`);
@@ -159,10 +178,23 @@ export async function resolveConfig(
   const channelName = channel.name ?? "";
 
   // The harness posts, reacts and deletes. Pointing it at a working channel
-  // would be destructive, so the name must say it is disposable.
-  if (!channelName.includes("test")) {
+  // would be destructive, so the target must be demonstrably disposable.
+  const allowlist = (process.env.E2E_SLACK_CHANNEL_ALLOWLIST ?? "")
+    .split(",")
+    .map(entry => entry.trim())
+    .filter(Boolean);
+
+  if (allowlist.length > 0) {
+    if (!allowlist.includes(channelId)) {
+      throw new PreflightError(
+        `refusing to run in ${channelId}: not in E2E_SLACK_CHANNEL_ALLOWLIST`,
+      );
+    }
+  } else if (!isDisposableChannelName(channelName)) {
     throw new PreflightError(
-      `refusing to run in #${channelName}: channel name must contain "test"`,
+      `refusing to run in #${channelName}: the channel name must carry "test" ` +
+        "as its own word, or the channel id must be listed in " +
+        "E2E_SLACK_CHANNEL_ALLOWLIST",
     );
   }
   if (channel.is_member !== true) {
