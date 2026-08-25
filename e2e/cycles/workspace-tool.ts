@@ -1,4 +1,4 @@
-import { expect, type Cycle } from "../lib/cycle";
+import { expect, recordedToolCalls, type Cycle } from "../lib/cycle";
 
 /**
  * The bounded workspace file tools actually execute.
@@ -26,13 +26,14 @@ export const workspaceTool: Cycle = {
       match: message => (message.text ?? "").includes(expected),
     });
 
-    const toolCalls = /"toolCalls":(\d+)/.exec(ctx.logsSinceStart());
+    const toolCalls = recordedToolCalls(ctx.logsSinceStart());
     expect(
-      toolCalls !== null && Number(toolCalls[1]) > 0,
-      "the reply contained the file's contents but the app recorded no tool " +
-        "calls, so the value did not come from reading the file",
+      toolCalls !== undefined && toolCalls > 0,
+      "the reply contained the file's contents but the app recorded " +
+        `${toolCalls ?? "no"} tool calls, so the value did not come from ` +
+        "reading the file",
     );
 
-    return { evidence: `reply ${reply.ts}; toolCalls=${toolCalls?.[1]}` };
+    return { evidence: `reply ${reply.ts}; toolCalls=${toolCalls}` };
   },
 };

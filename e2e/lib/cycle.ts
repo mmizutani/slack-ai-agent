@@ -229,3 +229,21 @@ export async function cleanUp(
   }
   return { removed, attempted: unique.size, residue };
 }
+
+/**
+ * Tool calls the app recorded for the most recent turn in `logs`.
+ *
+ * `ConsoleEventHandler` reports a per-turn count on its "Message processed"
+ * event. Shared by every cycle that claims a tool ran, so the two tool cycles
+ * cannot assert it differently — one of them originally checked only that the
+ * expected string came back, which the model could in principle produce
+ * without calling anything.
+ *
+ * Returns undefined when no turn has been recorded yet, which is a different
+ * answer from zero and must not be conflated with it.
+ */
+export function recordedToolCalls(logs: string): number | undefined {
+  const matches = [...logs.matchAll(/"toolCalls":(\d+)/g)];
+  const last = matches[matches.length - 1];
+  return last ? Number(last[1]) : undefined;
+}

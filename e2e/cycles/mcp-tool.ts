@@ -1,11 +1,13 @@
-import { expect, type Cycle } from "../lib/cycle";
+import { expect, recordedToolCalls, type Cycle } from "../lib/cycle";
 
 /**
  * A stdio MCP server's tool is discovered and invoked.
  *
- * The fixture server returns MCP-OK-<code> for a code the model is given, so
- * the response cannot be produced without actually calling the tool: the model
- * has no way to know the MCP-OK- convention from the prompt.
+ * The fixture server returns MCP-OK-<code> for a code the model is given. The
+ * MCP-OK- convention appears nowhere in the prompt, so the reply is strong
+ * evidence the tool ran — but not proof, since a model could in principle
+ * produce the string. The recorded tool-call count settles it, and keeps this
+ * cycle symmetric with workspace-tool, which asserted both from the start.
  */
 export const mcpTool: Cycle = {
   id: "mcp-tool",
@@ -24,6 +26,12 @@ export const mcpTool: Cycle = {
       match: message => (message.text ?? "").includes(`MCP-OK-${code}`),
     });
 
-    return { evidence: `reply ${reply.ts}` };
+    const toolCalls = recordedToolCalls(ctx.logsSinceStart());
+    expect(
+      toolCalls !== undefined && toolCalls > 0,
+      `the reply carried MCP-OK-${code} but the app recorded ${toolCalls ?? "no"} tool calls, so it did not come from the MCP server`,
+    );
+
+    return { evidence: `reply ${reply.ts}; toolCalls=${toolCalls}` };
   },
 };
