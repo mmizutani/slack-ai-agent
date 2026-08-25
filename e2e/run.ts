@@ -1,0 +1,336 @@
+/**
+ * Live end-to-end verification against a real Slack workspace.
+ *
+ * Runs the cycle set once per provider, each in its own child process, and
+ * exits non-zero if anything regressed. Intended to be run by a coding agent
+ * after changing this codebase: `E2E_LIVE=1 pnpm e2e:live --channel C…`.
+ */
+import fs from "fs";
+import path from "path";
+import {
+  PreflightError,
+  resolveConfig,
+  type HarnessConfig,
+} from "./lib/config";
+import { AgentHost } from "./lib/host";
+import { phaseEnv } from "./lib/phase-env";
+import {
+  cleanUp,
+  makeContext,
+  CYCLE_PROFILES,
+  type Cycle,
+  type CycleOutcome,
+  type CycleProfile,
+  type Trace,
+} from "./lib/cycle";
+import {
+  formatSummary,
+  summarize,
+  type CycleResult,
+  type ProviderId,
+} from "./lib/report";
+import { channelMention } from "./cycles/channel-mention";
+import { dm } from "./cycles/dm";
+import { threadContinuity } from "./cycles/thread-continuity";
+import { reactions } from "./cycles/reactions";
+import { cancellation } from "./cycles/cancellation";
+import { providerError } from "./cycles/provider-error";
+import { workspaceTool } from "./cycles/workspace-tool";
+import { mcpTool } from "./cycles/mcp-tool";
+import { buttonApproval } from "./cycles/button-approval";
+import { startFakeProvider } from "./fixtures/fake-provider-server";
+import { installFixtures, type FixtureSet } from "./lib/fixtures";
+
+const CYCLES: Cycle[] = [
+  channelMention,
+  dm,
+  threadContinuity,
+  reactions,
+  workspaceTool,
+  mcpTool,
+  buttonApproval,
+  cancellation,
+  providerError,
+];
+
+const REPORT_DIR = path.resolve(__dirname, "report");
+
+function selected(config: HarnessConfig): Cycle[] {
+  if (!config.onlyCycles) return CYCLES;
+  const known = new Set(CYCLES.map(c => c.id));
+  for (const id of config.onlyCycles) {
+    if (!known.has(id)) {
+      throw new PreflightError(
+        `unknown cycle: ${id} (known: ${[...known].join(", ")})`,
+      );
+    }
+  }
+  return CYCLES.filter(c => config.onlyCycles!.includes(c.id));
+}
+
+async function runPhase(
+  config: HarnessConfig,
+  provider: ProviderId,
+  cycles: readonly Cycle[],
+  track: (trace: Trace) => void,
+  options: {
+    providerBaseUrl?: string;
+    fakeProviderHits?: () => number;
+    fixtures?: FixtureSet;
+    profile?: CycleProfile;
+  } = {},
+): Promise<CycleResult[]> {
+  const results: CycleResult[] = [];
+  const label = `${provider}-${options.profile ?? "default"}`;
+  const host = await AgentHost.start({
+    label,
+    env: phaseEnv(process.env, {
+      provider,
+      ...(options.providerBaseUrl
+        ? { providerBaseUrl: options.providerBaseUrl }
+        : {}),
+      ...(options.fixtures
+        ? {
+            mcpConfigPath: options.fixtures.mcpConfigPath,
+            // Only the actions profile loads the fixture action; elsewhere its
+            // alwaysInject tool would be offered on every turn and sometimes
+            // called during an unrelated cycle.
+            ...(options.profile === "actions"
+              ? { customActionsDir: options.fixtures.customActionsDir }
+              : {}),
+          }
+        : {}),
+    }),
+  });
+
+  try {
+    const enabled = host.enabledProviders();
+    if (enabled.length !== 1 || enabled[0] !== provider) {
+      // Not a cycle failure but a harness failure: every result from this
+      // phase would be attributed to the wrong runtime.
+      throw new Error(
+        `phase isolation broke: expected only ${provider}, host enabled ${enabled.join(", ") || "nothing"}`,
+      );
+    }
+
+    for (const cycle of cycles) {
+      const started = Date.now();
+      process.stdout.write(`  … ${provider}/${cycle.id}\n`);
+      // Built outside the try so a failing cycle can still report what the app
+      // logged. Debugging a silent non-reply without this is guesswork.
+      const ctx = makeContext({
+        config,
+        host,
+        provider,
+        cycleId: cycle.id,
+        track,
+        ...(options.fakeProviderHits
+          ? { fakeProviderHits: options.fakeProviderHits }
+          : {}),
+        ...(options.fixtures ? { fixtures: options.fixtures } : {}),
+        ...(cycle.timeoutMs ? { timeoutMs: cycle.timeoutMs } : {}),
+      });
+      try {
+        const outcome: CycleOutcome = await cycle.run(ctx);
+        const gap = outcome && "gap" in outcome ? outcome.gap : undefined;
+        results.push({
+          cycleId: cycle.id,
+          provider,
+          status: gap ? "skipped" : "passed",
+          durationMs: Date.now() - started,
+          ...(gap ? { gap } : {}),
+          ...(outcome && "evidence" in outcome && outcome.evidence
+            ? { evidence: outcome.evidence }
+            : {}),
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "unknown failure";
+        results.push({
+          cycleId: cycle.id,
+          provider,
+          status: "failed",
+          durationMs: Date.now() - started,
+          detail: message,
+        });
+        // Surface what the app said, not just that nothing arrived. The first
+        // line mentioning ERROR or WARN is usually the whole story.
+        const noisy = ctx
+          .logsSinceStart()
+          .split("\n")
+          .filter(line => /\[(ERROR|WARN)\]/.test(line))
+          .slice(-4);
+        if (noisy.length) {
+          console.log(`      app said:\n        ${noisy.join("\n        ")}`);
+        }
+      }
+    }
+  } finally {
+    // Nested, so a failure writing the phase log cannot skip host.stop() and
+    // strand a child holding a Socket Mode connection.
+    try {
+      fs.mkdirSync(REPORT_DIR, { recursive: true });
+      fs.writeFileSync(
+        path.join(REPORT_DIR, `${config.runId}-${label}.log`),
+        host.logs(),
+      );
+    } finally {
+      await host.stop();
+    }
+  }
+
+  return results;
+}
+
+async function main(): Promise<void> {
+  const config = await resolveConfig(process.argv.slice(2));
+  const cycles = selected(config);
+  const traces: Trace[] = [];
+  const track = (trace: Trace): void => {
+    traces.push(trace);
+  };
+
+  console.log(
+    `run ${config.runId} → #${config.channelName} (${config.channelId})  providers: ${config.providers.join(", ")}  cycles: ${cycles.map(c => c.id).join(", ")}`,
+  );
+
+  // Installed for the whole run: the tool allowlist has no environment
+  // override and must be written into config/, so it is put back on teardown.
+  const fixtures = await installFixtures(config.runId);
+
+  const results: CycleResult[] = [];
+  let teardownDone = false;
+  let teardownFailure: string | undefined;
+
+  /**
+   * Every stage runs even when an earlier one fails, and anything left behind
+   * fails the run. Stopping at the first error used to skip Slack cleanup
+   * entirely whenever fixture restoration threw, and residue was printed but
+   * not acted on — so a run could exit 0 having left the operator's config
+   * modified and messages sitting in the channel.
+   */
+  const teardown = async (): Promise<void> => {
+    if (teardownDone) return;
+    teardownDone = true;
+    const problems: string[] = [];
+
+    try {
+      await fixtures.cleanUp();
+    } catch (error) {
+      problems.push(
+        `fixture cleanup failed: ${error instanceof Error ? error.message : "unknown"}`,
+      );
+    }
+
+    if (config.keep) {
+      console.log(`\n--keep: left ${traces.length} messages in Slack`);
+    } else {
+      try {
+        const result = await cleanUp(traces, config.bot, config.driver);
+        console.log(
+          `\ncleaned up ${result.removed}/${result.attempted} messages`,
+        );
+        for (const left of result.residue) {
+          console.log(
+            `  LEFT BEHIND ${left.channel}/${left.ts}: ${left.reason}`,
+          );
+        }
+        if (result.residue.length > 0) {
+          problems.push(`${result.residue.length} message(s) left in Slack`);
+        }
+      } catch (error) {
+        problems.push(
+          `slack cleanup failed: ${error instanceof Error ? error.message : "unknown"}`,
+        );
+      }
+    }
+
+    if (problems.length > 0) teardownFailure = problems.join("; ");
+  };
+
+  // A killed run must not leave the channel dirty.
+  process.on("SIGINT", () => {
+    // finally, not then: a teardown that rejects must still exit, or Ctrl-C
+    // leaves the run hanging with its child processes alive.
+    void teardown()
+      .catch(error => {
+        console.error(
+          `teardown failed during interrupt: ${error instanceof Error ? error.message : "unknown"}`,
+        );
+      })
+      .finally(() => process.exit(130));
+  });
+
+  try {
+    for (const provider of config.providers) {
+      for (const profile of CYCLE_PROFILES) {
+        const group = cycles.filter(c => (c.profile ?? "default") === profile);
+        if (!group.length) continue;
+
+        if (profile !== "failing-provider") {
+          results.push(
+            ...(await runPhase(config, provider, group, track, {
+              fixtures,
+              profile,
+            })),
+          );
+          continue;
+        }
+
+        // Its own host: the base URL override is process-wide, so it cannot
+        // share a process with cycles that need the provider to work.
+        const fake = await startFakeProvider();
+        try {
+          results.push(
+            ...(await runPhase(config, provider, group, track, {
+              fixtures,
+              profile,
+              providerBaseUrl: fake.url,
+              fakeProviderHits: fake.hits,
+            })),
+          );
+        } finally {
+          await fake.close();
+        }
+      }
+    }
+  } finally {
+    await teardown();
+  }
+
+  const summary = summarize(results);
+  console.log("");
+  console.log(formatSummary(results, summary));
+  if (teardownFailure) console.log(`  teardown: ${teardownFailure}`);
+
+  fs.mkdirSync(REPORT_DIR, { recursive: true });
+  const reportPath = path.join(REPORT_DIR, `${config.runId}.json`);
+  fs.writeFileSync(
+    reportPath,
+    JSON.stringify(
+      {
+        runId: config.runId,
+        channel: { id: config.channelId, name: config.channelName },
+        providers: config.providers,
+        results,
+        summary,
+        ...(teardownFailure ? { teardownFailure } : {}),
+      },
+      null,
+      2,
+    ),
+  );
+  console.log(`\nreport: ${reportPath}`);
+  // A run that could not clean up after itself has not passed, however green
+  // its cycles were.
+  process.exit(teardownFailure ? 1 : summary.exitCode);
+}
+
+main().catch(error => {
+  if (error instanceof PreflightError) {
+    console.error(`preflight: ${error.message}`);
+    process.exit(2);
+  }
+  console.error(error instanceof Error ? error.stack : error);
+  process.exit(1);
+});
